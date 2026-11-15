@@ -1,11 +1,12 @@
 import json
 import os
 import re
+import tempfile
 from datetime import datetime
+from enum import IntEnum
 from pathlib import Path
 
-from enum import IntEnum
-
+import requests
 from loguru import logger
 from PySide6.QtCore import Property, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QApplication, QFileDialog
@@ -39,6 +40,7 @@ class PluginConfig(ConfigBaseModel):
     interval_minutes: int = 20
     schedule_name: str = DEFAULT_SCHEDULE_NAME
     timetable_file: str = ""
+    timetable_url: str = ""
     last_sync_at: str = ""
     notify_startup: bool = True
     notify_scheduled: bool = False
@@ -87,6 +89,7 @@ class SyncThread(QThread):
         sync_timeline: bool,
         reason: str,
         timetable_file: str = "",
+        timetable_url: str = "",
         existing_schedule=None,
     ):
         super().__init__()
@@ -95,14 +98,42 @@ class SyncThread(QThread):
         self._sync_timeline = sync_timeline
         self._reason = reason
         self._timetable_file = timetable_file
+        self._timetable_url = timetable_url
         self._existing_schedule = existing_schedule or {}
+
+    def _download_timetable(self, url: str) -> Path:
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
+        if self._encrypted_account:
+            try:
+                username, password = unprotect_account(self._encrypted_account)
+                client = ChaoxingClient()
+                client.login(username, password)
+                session = client.session
+            except Exception:
+                pass
+        response = session.get(url, timeout=(10, 90))
+        response.raise_for_status()
+        content = response.content
+        if not content.startswith(b"PK"):
+            raise ValueError("下载的文件不是有效的 xlsx 文件")
+        descriptor, name = tempfile.mkstemp(prefix="chaoxing-timetable-", suffix=".xlsx")
+        os.close(descriptor)
+        path = Path(name)
+        path.write_bytes(content)
+        return path
 
     def run(self):
         username = ""
         password = ""
+        temp_file = None
         try:
-            if self._timetable_file:
-                parsed = parse_timetable_xlsx(self._timetable_file)
+            source_file = self._timetable_file
+            if not source_file and self._timetable_url:
+                temp_file = self._download_timetable(self._timetable_url)
+                source_file = str(temp_file)
+            if source_file:
+                parsed = parse_timetable_xlsx(source_file)
                 schedule, info = build_xlsx_schedule(
                     parsed,
                     self._existing_schedule,
@@ -112,7 +143,7 @@ class SyncThread(QThread):
                 info["synced_at"] = datetime.now().isoformat(timespec="seconds")
                 logger.info(
                     "Parsed timetable file {} ({} blocks, {} subjects, {} entries)".format(
-                        self._timetable_file,
+                        source_file,
                         info.get("lesson_count", 0),
                         info.get("course_count", 0),
                         info.get("entry_count", 0),
@@ -144,6 +175,11 @@ class SyncThread(QThread):
             username = ""
             password = ""
             self._encrypted_account = ""
+            if temp_file is not None:
+                try:
+                    temp_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def _sanitize_schedule_name(name: str) -> str:
@@ -226,7 +262,11 @@ class Plugin(CW2Plugin):
 
     @Property(bool, notify=configChanged)
     def autoSyncAllowed(self) -> bool:
-        source_ready = self.credentialsConfigured or bool(str(self.config.timetable_file or "").strip())
+        source_ready = (
+            self.credentialsConfigured
+            or bool(str(self.config.timetable_file or "").strip())
+            or bool(str(self.config.timetable_url or "").strip())
+        )
         return source_ready and (self.config.sync_courses or self.config.sync_timeline)
 
     @Property(int, notify=configChanged)
@@ -240,6 +280,10 @@ class Plugin(CW2Plugin):
     @Property(str, notify=configChanged)
     def timetableFile(self) -> str:
         return str(self.config.timetable_file or "")
+
+    @Property(str, notify=configChanged)
+    def timetableUrl(self) -> str:
+        return str(self.config.timetable_url or "")
 
     @Property(bool, notify=syncStateChanged)
     def syncing(self) -> bool:
@@ -398,6 +442,17 @@ class Plugin(CW2Plugin):
         self._set_status(f"已选择课表文件：{Path(path).name}")
         return path
 
+    @Slot(str)
+    def setTimetableUrl(self, url: str):
+        self.config.timetable_url = str(url or "").strip()
+        self._save_config()
+        self.configChanged.emit()
+        self._apply_config()
+        self._set_status(
+            "已设置课表文件下载地址" if self.config.timetable_url
+            else "已清除课表文件下载地址"
+        )
+
     @Slot()
     def clearTimetableFile(self):
         self.config.timetable_file = ""
@@ -472,10 +527,11 @@ class Plugin(CW2Plugin):
         if self._closing or self._syncing or self._account_checking:
             return
         timetable_file = str(self.config.timetable_file or "").strip()
-        if not timetable_file and not self.credentialsConfigured:
-            self._set_status("请先设置超星学习通账号或选择课表导出文件")
+        timetable_url = str(self.config.timetable_url or "").strip()
+        if not timetable_file and not timetable_url and not self.credentialsConfigured:
+            self._set_status("请先设置超星学习通账号、课表文件或课表下载地址")
             if manual:
-                self._notify("manual", NotificationLevel.WARNING, "超星学习通", "请先设置账号或选择课表文件")
+                self._notify("manual", NotificationLevel.WARNING, "超星学习通", "请先设置账号、课表文件或下载地址")
             return
         if not (self.config.sync_courses or self.config.sync_timeline):
             self._set_status("同步课程与时间线均已关闭，自动同步已停止")
@@ -485,13 +541,18 @@ class Plugin(CW2Plugin):
         self._syncing = True
         self.syncStateChanged.emit()
         self._set_status("正在同步课表…")
-        existing_schedule = self._read_existing_schedule() if timetable_file else None
+        existing_schedule = (
+            self._read_existing_schedule()
+            if (timetable_file or timetable_url)
+            else None
+        )
         thread = SyncThread(
             self.config.encrypted_account,
             bool(self.config.sync_courses),
             bool(self.config.sync_timeline),
             reason,
             timetable_file,
+            timetable_url,
             existing_schedule,
         )
         thread.succeeded.connect(self._on_sync_success)
@@ -543,6 +604,7 @@ class Plugin(CW2Plugin):
             detail += f"，{len(failed_weeks)} 个周次请求失败"
         requested_courses = bool(info.get("sync_courses"))
         requested_timeline = bool(info.get("sync_timeline"))
+        fill_timeline = bool(info.get("fill_timeline", requested_timeline))
         has_courses = bool(info.get("course_count"))
         has_timeline = bool(info.get("entry_count"))
         if requested_courses and requested_timeline and not has_courses and not has_timeline:
@@ -562,7 +624,7 @@ class Plugin(CW2Plugin):
             name, path, is_current = self._write_schedule(
                 schedule,
                 requested_courses,
-                requested_timeline,
+                fill_timeline,
             )
         except Exception as error:
             self._on_sync_failed(f"保存课表失败：{error}", reason)
@@ -579,7 +641,10 @@ class Plugin(CW2Plugin):
         if info.get("skipped_count"):
             message += f"，跳过 {info['skipped_count']} 条无效记录"
         if requested_timeline and not has_timeline:
-            message += "；超星课表接口未返回上课时间，已仅同步课程"
+            if info.get("source") == "xlsx":
+                message += "；目标课表没有可用时间线，已仅同步课程"
+            else:
+                message += "；超星课表接口未返回上课时间，已仅同步课程"
         if requested_courses and not has_courses:
             message += "；未获取到课程列表"
         if failed_weeks:
@@ -636,7 +701,7 @@ class Plugin(CW2Plugin):
     def _is_auto_timeline(timeline):
         return str((timeline or {}).get("id") or "").startswith(AUTO_TIMELINE_PREFIXES)
 
-    def _merge_schedule(self, existing, generated, sync_courses, sync_timeline):
+    def _merge_schedule(self, existing, generated, sync_courses, fill_timeline):
         existing = existing if isinstance(existing, dict) else {}
         generated = generated if isinstance(generated, dict) else {}
         existing_days = [day for day in existing.get("days") or [] if isinstance(day, dict)]
@@ -664,7 +729,7 @@ class Plugin(CW2Plugin):
             referenced = set()
             kept_existing_days = (
                 existing_days
-                if not sync_timeline
+                if not fill_timeline
                 else [day for day in existing_days if not self._is_auto_timeline(day)]
             )
             for day in kept_existing_days:
@@ -728,7 +793,7 @@ class Plugin(CW2Plugin):
             item["entries"] = entries
             new_days.append(item)
 
-        if sync_timeline:
+        if fill_timeline:
             days = [dict(day) for day in existing_days if not self._is_auto_timeline(day)] + new_days
         else:
             days = [dict(day) for day in existing_days]
@@ -740,7 +805,7 @@ class Plugin(CW2Plugin):
             "overrides": [dict(override) for override in existing_overrides],
         }
 
-    def _write_schedule(self, schedule, sync_courses, sync_timeline):
+    def _write_schedule(self, schedule, sync_courses, fill_timeline):
         name = _sanitize_schedule_name(self.config.schedule_name)
         if name != self.config.schedule_name:
             self.config.schedule_name = name
@@ -769,7 +834,7 @@ class Plugin(CW2Plugin):
                 existing = None
             if not marker.startswith("chaoxing-"):
                 raise RuntimeError("目标课表已存在且不是本插件创建的，请更换课表名称")
-        merged = self._merge_schedule(existing, schedule, sync_courses, sync_timeline)
+        merged = self._merge_schedule(existing, schedule, sync_courses, fill_timeline)
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.parent / f".{path.name}.{os.getpid()}.tmp"
         try:

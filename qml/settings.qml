@@ -20,6 +20,7 @@ FluentPage {
         intervalSpin.value = backend.intervalMinutes
         nameField.text = backend.scheduleName
         timetableFileField.text = backend.timetableFile
+        timetableUrlField.text = backend.timetableUrl
         notifyStartupSwitch.checked = backend.notifyStartup
         notifyScheduledSwitch.checked = backend.notifyScheduled
         notifyManualSwitch.checked = backend.notifyManual
@@ -149,7 +150,7 @@ FluentPage {
             expanded: true
             icon.name: "ic_fluent_document_table_20_regular"
             title: "课表导出文件（可选）"
-            description: "超星课表为空时，可选择学校导出的 .xlsx 课表作为数据源"
+            description: "可选择本地 .xlsx 课表，或填写学校提供的课表文件下载地址"
 
             SettingItem {
                 title: "文件路径"
@@ -161,6 +162,23 @@ FluentPage {
                     readOnly: true
                     placeholderText: "未选择文件"
                     selectByMouse: true
+                }
+            }
+
+            SettingItem {
+                title: "下载地址"
+                description: "如果学校提供课表文件的直接下载地址，可填在这里；本地文件优先"
+
+                TextField {
+                    id: timetableUrlField
+                    Layout.preferredWidth: 250
+                    placeholderText: "https://…/课表导出.xlsx"
+                    selectByMouse: true
+                    onEditingFinished: {
+                        if (backend) {
+                            backend.setTimetableUrl(text)
+                        }
+                    }
                 }
             }
 
@@ -213,7 +231,7 @@ FluentPage {
 
             SettingItem {
                 title: "同步时间线"
-                description: "从超星课表写入上课时间；超星课表为空时仅同步课程"
+                description: "开启时补全时间线；关闭时仍会按目标课表已有时间线填充课程"
 
                 Switch {
                     id: timelineSwitch
@@ -336,7 +354,7 @@ FluentPage {
             Button {
                 text: backend && backend.syncing ? "同步中…" : "立即同步"
                 enabled: backend
-                    && (backend.credentialsConfigured || backend.timetableFile.length > 0)
+                    && (backend.credentialsConfigured || backend.timetableFile.length > 0 || backend.timetableUrl.length > 0)
                     && !backend.syncing
                     && !backend.accountChecking
                     && (backend.syncCourses || backend.syncTimeline)

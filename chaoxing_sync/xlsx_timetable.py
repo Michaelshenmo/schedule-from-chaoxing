@@ -239,6 +239,19 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
     blocks = parsed.get("blocks") or []
     period_count = int(parsed.get("period_count") or 9)
     max_week = int(parsed.get("max_week") or 20)
+    has_user_timeline = any(
+        isinstance(timeline, dict)
+        and not str(timeline.get("id") or "").startswith("chaoxing-timeline-")
+        and any(
+            isinstance(entry, dict)
+            and entry.get("type") != "break"
+            and entry.get("startTime")
+            and entry.get("endTime")
+            for entry in timeline.get("entries") or []
+        )
+        for timeline in (existing_schedule.get("days") if isinstance(existing_schedule, dict) else []) or []
+    )
+    fill_timeline = bool(sync_timeline or has_user_timeline)
     subjects = {}
     subjects_by_key = {}
     timelines = {}
@@ -278,7 +291,7 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
         teacher = str(block.get("teacher") or "").strip()
         location = str(block.get("location") or "").strip()
         subject_id = ensure_subject(name, teacher, location) if sync_courses else ""
-        if not sync_timeline:
+        if not fill_timeline:
             continue
         day = int(block.get("dayOfWeek") or 0)
         start_period = int(block.get("periodStart") or 0)
@@ -364,6 +377,7 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
         "max_week": max_week,
         "sync_courses": bool(sync_courses),
         "sync_timeline": bool(sync_timeline),
+        "fill_timeline": bool(fill_timeline),
         "timetable_error": "",
         "course_error": "",
         "source": "xlsx",
