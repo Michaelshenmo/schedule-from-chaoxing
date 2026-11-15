@@ -8,7 +8,7 @@ from enum import IntEnum
 
 from loguru import logger
 from PySide6.QtCore import Property, QThread, QTimer, Signal, Slot
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtWidgets import QApplication, QFileDialog
 
 from ClassWidgets.SDK import CW2Plugin, ConfigBaseModel, PluginAPI
 
@@ -384,7 +384,7 @@ class Plugin(CW2Plugin):
     @Slot(result=str)
     def selectTimetableFile(self) -> str:
         path, _ = QFileDialog.getOpenFileName(
-            None,
+            QApplication.activeWindow(),
             "选择课表导出文件",
             "",
             "Excel 工作簿 (*.xlsx)",
@@ -662,9 +662,12 @@ class Plugin(CW2Plugin):
         remap = {}
         if sync_courses:
             referenced = set()
-            for day in existing_days:
-                if self._is_auto_timeline(day):
-                    continue
+            kept_existing_days = (
+                existing_days
+                if not sync_timeline
+                else [day for day in existing_days if not self._is_auto_timeline(day)]
+            )
+            for day in kept_existing_days:
                 for entry in day.get("entries") or []:
                     if isinstance(entry, dict) and entry.get("subjectId"):
                         referenced.add(str(entry["subjectId"]))

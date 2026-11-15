@@ -146,7 +146,7 @@ FluentPage {
 
         SettingExpander {
             Layout.fillWidth: true
-            expanded: false
+            expanded: true
             icon.name: "ic_fluent_document_table_20_regular"
             title: "课表导出文件（可选）"
             description: "超星课表为空时，可选择学校导出的 .xlsx 课表作为数据源"
