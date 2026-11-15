@@ -25,6 +25,7 @@ except ImportError:
 from chaoxing_sync.client import ChaoxingClient, ChaoxingError
 from chaoxing_sync.credentials import protect_account, unprotect_account
 from chaoxing_sync.schedule_builder import build_schedule
+from chaoxing_sync.admin_device import fetch_admin_timeline
 from chaoxing_sync.timeline_server import fetch_timeline
 from chaoxing_sync.xlsx_timetable import build_xlsx_schedule, parse_timetable_xlsx
 
@@ -43,7 +44,7 @@ class PluginConfig(ConfigBaseModel):
     timetable_file: str = ""
     timetable_url: str = ""
     timeline_server_url: str = ""
-    timeline_server_token: str = ""
+    device_sn: str = ""
     last_sync_at: str = ""
     notify_startup: bool = True
     notify_scheduled: bool = False
@@ -94,7 +95,7 @@ class SyncThread(QThread):
         timetable_file: str = "",
         timetable_url: str = "",
         timeline_server_url: str = "",
-        timeline_server_token: str = "",
+        device_sn: str = "",
         existing_schedule=None,
     ):
         super().__init__()
@@ -105,7 +106,7 @@ class SyncThread(QThread):
         self._timetable_file = timetable_file
         self._timetable_url = timetable_url
         self._timeline_server_url = timeline_server_url
-        self._timeline_server_token = timeline_server_token
+        self._device_sn = device_sn
         self._existing_schedule = existing_schedule or {}
 
     def _download_timetable(self, url: str) -> Path:
@@ -139,10 +140,13 @@ class SyncThread(QThread):
         try:
             if self._timeline_server_url:
                 try:
-                    admin_timeline = fetch_timeline(
-                        self._timeline_server_url,
-                        self._timeline_server_token,
-                    )
+                    if self._device_sn:
+                        admin_timeline = fetch_admin_timeline(
+                            self._timeline_server_url,
+                            self._device_sn,
+                        )
+                    else:
+                        admin_timeline = fetch_timeline(self._timeline_server_url)
                 except Exception as error:
                     timeline_error = str(error)
                     logger.warning(f"Timeline server request failed: {error}")
@@ -327,8 +331,8 @@ class Plugin(CW2Plugin):
         return str(self.config.timeline_server_url or "")
 
     @Property(str, notify=configChanged)
-    def timelineServerToken(self) -> str:
-        return str(self.config.timeline_server_token or "")
+    def deviceSn(self) -> str:
+        return str(self.config.device_sn or "")
 
     @Property(bool, notify=syncStateChanged)
     def syncing(self) -> bool:
@@ -510,8 +514,8 @@ class Plugin(CW2Plugin):
         )
 
     @Slot(str)
-    def setTimelineServerToken(self, token: str):
-        self.config.timeline_server_token = str(token or "").strip()
+    def setDeviceSn(self, sn: str):
+        self.config.device_sn = str(sn or "").strip()
         self._save_config()
         self.configChanged.emit()
 
@@ -616,7 +620,7 @@ class Plugin(CW2Plugin):
             timetable_file,
             timetable_url,
             str(self.config.timeline_server_url or "").strip(),
-            str(self.config.timeline_server_token or "").strip(),
+            str(self.config.device_sn or "").strip(),
             existing_schedule,
         )
         thread.succeeded.connect(self._on_sync_success)

@@ -52,7 +52,7 @@ cw-plugin-pack
    - 设置自动同步间隔（默认 20 分钟）
    - 在「通知选项」中分别控制启动、定时和手动同步通知
    - 正常情况下直接使用超星课表接口读取课程；如需要，可在「课表导出文件」中选择 `.xlsx` 或填写下载地址
-   - 在「时间线服务器」中填写 admin-system 服务器地址（如 `12.34.56.78:1234`）；需要鉴权时填写访问令牌
+   - 在「时间线服务器」中填写 admin-system 服务器地址（如 `12.34.56.78:1234`），并填写学校提供的设备 SN
    - 可修改目标课表名称（默认「超星学习通」），或点击「切换课表」查看结果
    - 点击「立即同步」可手动同步一次
 
@@ -69,8 +69,8 @@ cw-plugin-pack
 - 选择 `.xlsx` 课表文件或填写课表文件下载地址后，插件会优先使用该文件，并按时间线的节次顺序填充课程；开启「同步时间线」但目标课表没有可用时间线时，会使用内置的 20 分钟节次时间。
 - 设置时间线服务器后，插件会优先使用 admin-system 返回的节次时间；服务器不可用时会回退到超星课程接口自带时间线、目标课表时间线或内置节次时间，并在同步状态中提示。
 - 时间线接口支持常见的 `timeSlots`、`periods`、`days` 等字段，节次可包含 `name`、`start`/`end`、`period`、`dayOfWeek`；也支持 admin-system 教学策略中的 `schedules.weeklySlots`。
-- 插件会自动尝试 `服务端地址 + /api/public/teaching/timeline`、`/api/admin/teaching/draft` 等路径；admin-system 需要管理员令牌时，可在「访问令牌」中填写。
-- 如果 admin-system 还没有公开时间线接口，可把 [docs/admin-system-timeline-endpoint.py](docs/admin-system-timeline-endpoint.py) 中的路由加入 `admin-system/backend/routes/teaching.py`，之后插件只需填写服务器地址。
+- 插件会用设备 SN 向 vendor 服务认证，自动向 admin-system 注册设备并拉取教学策略时间线；无需管理员令牌。
+- 如果设备 SN 认证不可用，也可把 [docs/admin-system-timeline-endpoint.py](docs/admin-system-timeline-endpoint.py) 中的只读路由加入 `admin-system/backend/routes/teaching.py` 作为备用。
 - 课程读取方式与 android-app 一致：登录学习通后访问课表入口，再调用 `course.chaoxing.com/svcourse/new/timetable/getIssuedCourseInfo` 获取全部周次课程。
 - 示例：`{"data":{"timeSlots":[{"name":"第一节","start":"08:00","end":"08:40"}]}}`；按星期返回时可用 `{"data":{"days":{"1":[{"name":"第一节","start":"08:00","end":"08:40"}]}}}`。
 - 两项都关闭时，自动同步会停止。

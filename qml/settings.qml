@@ -22,7 +22,7 @@ FluentPage {
         timetableFileField.text = backend.timetableFile
         timetableUrlField.text = backend.timetableUrl
         timelineServerUrlField.text = backend.timelineServerUrl
-        timelineServerTokenField.text = backend.timelineServerToken
+        deviceSnField.text = backend.deviceSn
         notifyStartupSwitch.checked = backend.notifyStartup
         notifyScheduledSwitch.checked = backend.notifyScheduled
         notifyManualSwitch.checked = backend.notifyManual
@@ -232,18 +232,17 @@ FluentPage {
             }
 
             SettingItem {
-                title: "访问令牌"
-                description: "接口需要鉴权时填写；不需要可留空"
+                title: "设备 SN"
+                description: "用于向 admin-system 认证设备；由学校提供"
 
                 TextField {
-                    id: timelineServerTokenField
+                    id: deviceSnField
                     Layout.preferredWidth: 250
-                    placeholderText: "可选"
-                    echoMode: TextInput.Password
+                    placeholderText: "请输入设备 SN"
                     selectByMouse: true
                     onEditingFinished: {
                         if (backend) {
-                            backend.setTimelineServerToken(text)
+                            backend.setDeviceSn(text)
                         }
                     }
                 }

@@ -89,8 +89,7 @@ def _fallback_key() -> bytes:
     return key
 
 
-def protect_account(username: str, password: str) -> str:
-    payload = json.dumps({"u": username, "p": password}, ensure_ascii=False).encode("utf-8")
+def _protect_payload(payload: bytes) -> str:
     if os.name == "nt":
         try:
             return DPAPI_PREFIX + base64.b64encode(_dpapi(payload, True)).decode("ascii")
@@ -103,13 +102,13 @@ def protect_account(username: str, password: str) -> str:
     return AES_PREFIX + base64.b64encode(iv + ciphertext + mac).decode("ascii")
 
 
-def unprotect_account(blob: str) -> tuple[str, str]:
+def _unprotect_payload(blob: str) -> bytes:
     if not blob:
-        raise CredentialError("尚未设置账号")
+        raise CredentialError("尚未设置加密数据")
     try:
         if blob.startswith(DPAPI_PREFIX):
-            payload = _dpapi(base64.b64decode(blob[len(DPAPI_PREFIX):]), False)
-        elif blob.startswith(AES_PREFIX):
+            return _dpapi(base64.b64decode(blob[len(DPAPI_PREFIX):]), False)
+        if blob.startswith(AES_PREFIX):
             raw = base64.b64decode(blob[len(AES_PREFIX):])
             if len(raw) < 48:
                 raise ValueError("invalid payload")
@@ -118,10 +117,22 @@ def unprotect_account(blob: str) -> tuple[str, str]:
             expected = hmac.new(key, iv + ciphertext, hashlib.sha256).digest()
             if not hmac.compare_digest(mac, expected):
                 raise ValueError("integrity check failed")
-            payload = decrypt_cbc(key, iv, ciphertext)
-        else:
-            raise ValueError("unknown format")
-        data = json.loads(payload.decode("utf-8"))
+            return decrypt_cbc(key, iv, ciphertext)
+        raise ValueError("unknown format")
+    except CredentialError:
+        raise
+    except Exception as error:
+        raise CredentialError("无法解密已保存的数据") from error
+
+
+def protect_account(username: str, password: str) -> str:
+    payload = json.dumps({"u": username, "p": password}, ensure_ascii=False).encode("utf-8")
+    return _protect_payload(payload)
+
+
+def unprotect_account(blob: str) -> tuple[str, str]:
+    try:
+        data = json.loads(_unprotect_payload(blob).decode("utf-8"))
         username = str(data.get("u") or "")
         password = str(data.get("p") or "")
         if not username or not password:
@@ -131,3 +142,18 @@ def unprotect_account(blob: str) -> tuple[str, str]:
         raise
     except Exception as error:
         raise CredentialError("无法解密已保存的账号，请重新设置账号") from error
+
+
+def protect_text(text: str) -> str:
+    payload = json.dumps({"t": str(text or "")}, ensure_ascii=False).encode("utf-8")
+    return _protect_payload(payload)
+
+
+def unprotect_text(blob: str) -> str:
+    try:
+        data = json.loads(_unprotect_payload(blob).decode("utf-8"))
+        return str(data.get("t") or "")
+    except CredentialError:
+        raise
+    except Exception as error:
+        raise CredentialError("无法解密已保存的数据") from error
