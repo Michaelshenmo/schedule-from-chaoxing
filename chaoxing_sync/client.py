@@ -1,5 +1,9 @@
 import base64
+import json
+import re
 import time
+from datetime import datetime
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -12,6 +16,8 @@ LOGIN_ENDPOINT = "https://passport2.chaoxing.com/fanyalogin"
 SCHEDULE_PAGE = "https://kb.chaoxing.com/res/pc/curriculum/schedule.html"
 LESSONS_ENDPOINT = "https://kb.chaoxing.com/pc/curriculum/getMyLessons"
 COURSE_LIST_ENDPOINT = "https://mooc1-api.chaoxing.com/mycourse/backclazzdata?view=json&rss=1"
+TIMETABLE_PORTAL = "https://i.chaoxing.com/wfw/space/redirectUrl"
+ISSUED_COURSES_ENDPOINT = "https://course.chaoxing.com/svcourse/new/timetable/getIssuedCourseInfo"
 TRANSFER_KEY = b"u2oh6Vu^HWe4_AES"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -116,6 +122,215 @@ class ChaoxingClient:
         if data.get("result") != 1:
             raise ChaoxingError(data.get("msg") or "获取课表失败")
         return data.get("data") or {}
+
+    def _timetable_fid(self):
+        fid = str(self.session.cookies.get("fid") or "").strip()
+        if fid.isdigit():
+            return fid
+        try:
+            curriculum = (self._get_lessons().get("curriculum") or {})
+            fid = str(curriculum.get("fid") or curriculum.get("userFid") or "").strip()
+            if fid.isdigit():
+                return fid
+        except ChaoxingError:
+            pass
+        return ""
+
+    @staticmethod
+    def _parse_week_data(html: str):
+        match = re.search(r"weekData\s*=\s*JSON\.parse\('(.*?)'\);", html, re.S)
+        if not match:
+            return []
+        try:
+            return json.loads(match.group(1))
+        except (TypeError, ValueError):
+            return []
+
+    @staticmethod
+    def _week_start_timestamp(weeks):
+        if not weeks:
+            return None
+        first = weeks[0] if isinstance(weeks[0], dict) else {}
+        value = str(first.get("weekDate") or "").strip()
+        try:
+            return int(datetime.strptime(value, "%Y-%m-%d").timestamp() * 1000)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _default_timeline(data):
+        grouped = {}
+        for item in data.get("newLessons") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                day = int(item.get("weekDay") or 0)
+                period = int(item.get("curriNum") or 0)
+            except (TypeError, ValueError):
+                continue
+            start = str(item.get("begin") or "").strip()
+            end = str(item.get("end") or "").strip()
+            if not (1 <= day <= 7) or period < 1 or not start or not end:
+                continue
+            grouped.setdefault(day, []).append({
+                "name": str(item.get("curriNumName") or f"第{period}节"),
+                "start": start,
+                "end": end,
+                "period": period,
+            })
+        if len(grouped) >= 2:
+            for slots in grouped.values():
+                slots.sort(key=lambda slot: slot["period"])
+            return grouped
+        slots = []
+        for item in data.get("weekDayNum") or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                period = int(item.get("curriNum") or 0)
+            except (TypeError, ValueError):
+                continue
+            start = str(item.get("begin") or "").strip()
+            end = str(item.get("end") or "").strip()
+            if period < 1 or not start or not end:
+                continue
+            slots.append({
+                "name": str(item.get("curriNumName") or f"第{period}节"),
+                "start": start,
+                "end": end,
+                "period": period,
+            })
+        slots.sort(key=lambda slot: slot["period"])
+        return {0: slots} if slots else {}
+
+    @staticmethod
+    def _time_config(data):
+        values = []
+        for item in data.get("weekDayNum") or []:
+            if not isinstance(item, dict):
+                continue
+            start = str(item.get("begin") or "").strip()
+            end = str(item.get("end") or "").strip()
+            if start and end:
+                values.append(f"{start}-{end}")
+        return values
+
+    def fetch_issued_courses(self) -> dict:
+        fid = self._timetable_fid()
+        if not fid:
+            raise ChaoxingError("未获取到学校 fid，无法打开课表")
+        portal = self.session.get(
+            TIMETABLE_PORTAL,
+            params={"fid": fid, "type": "3", "appCenter": "1", "mAppId": "11262802"},
+            timeout=self.timeout,
+            allow_redirects=True,
+        )
+        portal.raise_for_status()
+        final_url = portal.url
+        if "course.chaoxing.com" not in final_url:
+            raise ChaoxingError("课表入口未跳转到超星课表")
+        query = parse_qs(urlparse(final_url).query)
+        task_id = (query.get("taskId") or [""])[0]
+        user_id = (query.get("userId") or [""])[0]
+        table_type = (query.get("tableType") or [""])[0]
+        show_type = (query.get("type") or ["4"])[0]
+        if not task_id:
+            match = re.search(r'id="taskId"[^>]*value="([^"]+)"', portal.text)
+            task_id = match.group(1) if match else ""
+        if not task_id or not user_id:
+            raise ChaoxingError("未解析到课表 taskId/userId")
+        response = self._get_json(
+            ISSUED_COURSES_ENDPOINT,
+            params={
+                "type": show_type,
+                "taskId": task_id,
+                "parameter": user_id,
+                "weekNum": "",
+                "weeks": "",
+                "custom": "",
+                "actual": "true",
+                "needShowByCampus": "",
+                "tableType": table_type,
+            },
+            headers={
+                "Referer": final_url,
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+            },
+        )
+        if not isinstance(response, dict) or response.get("success") is not True:
+            raise ChaoxingError("课表接口返回失败")
+        data = response.get("data") or {}
+        rows = data.get("data") or []
+        if not isinstance(rows, list) or not rows:
+            raise ChaoxingError("课表接口未返回课程")
+        lessons = []
+        courses = {}
+        max_week = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("subjectName") or row.get("teachingClassName") or "").strip()
+            if not name:
+                continue
+            try:
+                day = int(row.get("weekDay") or 0)
+                period = int(row.get("curricNum") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not (1 <= day <= 7) or period < 1:
+                continue
+            weeks = []
+            for value in row.get("weekNumList") or []:
+                try:
+                    number = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if number >= 1:
+                    weeks.append(number)
+            if not weeks:
+                weeks = sorted(parse_weeks(row.get("weeks"), 60))
+            if not weeks:
+                continue
+            max_week = max(max_week, max(weeks))
+            teacher = str(row.get("teacherNames") or "").strip()
+            location = " ".join(part for part in (str(row.get("building") or "").strip(), str(row.get("classroom") or "").strip()) if part)
+            lessons.append({
+                "name": name,
+                "dayOfWeek": day,
+                "beginNumber": period,
+                "length": 1,
+                "weeks": sorted(set(weeks)),
+                "teacherName": teacher,
+                "location": location,
+                "lessonConfigUuid": str(row.get("teachingClassId") or row.get("id") or f"{name}-{day}-{period}"),
+            })
+            courses.setdefault(name, {"name": name, "teacher": teacher})
+        if not lessons:
+            raise ChaoxingError("课表接口未返回可用课程")
+        week_data = self._parse_week_data(portal.text)
+        max_week = max(max_week, len(week_data))
+        start_timestamp = self._week_start_timestamp(week_data)
+        if start_timestamp is None:
+            start_timestamp = int((time.time() - max(0, max_week - 1) * 7 * 86400) * 1000)
+        default_timeline = self._default_timeline(data)
+        curriculum = {
+            "uuid": f"svcourse-{task_id}",
+            "fid": fid,
+            "firstWeekDateReal": start_timestamp,
+            "maxWeek": max(max_week, 1),
+            "lessonTimeConfigArray": self._time_config(data),
+        }
+        return {
+            "curriculum": curriculum,
+            "lessons": lessons,
+            "courses": list(courses.values()),
+            "max_week": max(max_week, 1),
+            "failed_weeks": [],
+            "timetable_error": "",
+            "course_error": "",
+            "default_timeline": default_timeline,
+        }
 
     def fetch_courses(self) -> list:
         data = self._get_json(

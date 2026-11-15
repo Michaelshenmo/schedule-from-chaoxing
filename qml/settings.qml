@@ -216,12 +216,12 @@ FluentPage {
 
             SettingItem {
                 title: "服务器地址"
-                description: "填写 admin-system 提供的时间线接口完整地址"
+                description: "填写 admin-system 服务器地址，插件会自动尝试时间线接口"
 
                 TextField {
                     id: timelineServerUrlField
                     Layout.preferredWidth: 250
-                    placeholderText: "https://example.com/api/timeline"
+                    placeholderText: "12.34.56.78:1234"
                     selectByMouse: true
                     onEditingFinished: {
                         if (backend) {

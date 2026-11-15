@@ -22,7 +22,7 @@ except ImportError:
         WARNING = 2
         SYSTEM = 3
 
-from chaoxing_sync.client import ChaoxingClient
+from chaoxing_sync.client import ChaoxingClient, ChaoxingError
 from chaoxing_sync.credentials import protect_account, unprotect_account
 from chaoxing_sync.schedule_builder import build_schedule
 from chaoxing_sync.timeline_server import fetch_timeline
@@ -134,12 +134,12 @@ class SyncThread(QThread):
         username = ""
         password = ""
         temp_file = None
-        server_timeline = {}
+        admin_timeline = {}
         timeline_error = ""
         try:
             if self._timeline_server_url:
                 try:
-                    server_timeline = fetch_timeline(
+                    admin_timeline = fetch_timeline(
                         self._timeline_server_url,
                         self._timeline_server_token,
                     )
@@ -157,7 +157,7 @@ class SyncThread(QThread):
                     self._existing_schedule,
                     self._sync_courses,
                     self._sync_timeline,
-                    server_timeline,
+                    admin_timeline,
                 )
                 info["synced_at"] = datetime.now().isoformat(timespec="seconds")
                 info["timeline_error"] = timeline_error
@@ -174,19 +174,29 @@ class SyncThread(QThread):
             username, password = unprotect_account(self._encrypted_account)
             client = ChaoxingClient()
             client.login(username, password)
-            data = client.fetch_all_lessons(
-                include_timetable=self._sync_timeline,
-                include_courses=self._sync_courses,
-            )
+            try:
+                data = client.fetch_issued_courses()
+                issued_courses = True
+            except ChaoxingError as issued_error:
+                logger.warning(f"Issued course API failed, falling back: {issued_error}")
+                data = client.fetch_all_lessons(
+                    include_timetable=self._sync_timeline,
+                    include_courses=self._sync_courses,
+                )
+                data["default_timeline"] = {}
+                issued_courses = False
+            effective_timeline = admin_timeline or data.get("default_timeline") or {}
             data["timeline_error"] = timeline_error
             schedule, info = build_schedule(
                 data,
                 self._sync_courses,
                 self._sync_timeline,
-                server_timeline,
+                effective_timeline,
             )
             info["synced_at"] = datetime.now().isoformat(timespec="seconds")
             info["timeline_error"] = timeline_error
+            info["timeline_source"] = "server" if admin_timeline else ("course" if data.get("default_timeline") else "api")
+            info["issued_courses"] = issued_courses
             logger.info(
                 "Chaoxing fetched {} lesson groups across {} weeks ({} weeks failed, {} time slots)".format(
                     info.get("lesson_count", 0),
@@ -704,7 +714,7 @@ class Plugin(CW2Plugin):
         if requested_courses and not has_courses:
             message += "；未获取到课程列表"
         if timeline_error:
-            message += "；时间线服务器请求失败，已使用目标课表或默认时间线"
+            message += "；时间线服务器请求失败，已使用超星课程接口或目标课表时间线"
         if failed_weeks:
             message += f"；{len(failed_weeks)} 个周次获取失败"
         if not is_current:

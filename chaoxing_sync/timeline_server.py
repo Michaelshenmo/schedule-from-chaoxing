@@ -1,4 +1,6 @@
+import json
 import re
+from urllib.parse import urlparse
 
 import requests
 
@@ -34,6 +36,16 @@ def _clock(value):
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
     return f"{hour:02d}:{minute:02d}"
+
+
+def _minute_clock(value):
+    try:
+        minute = int(value)
+    except (TypeError, ValueError):
+        return None
+    if minute < 0 or minute > 1439:
+        return None
+    return f"{minute // 60:02d}:{minute % 60:02d}"
 
 
 def _split_time_range(value):
@@ -79,6 +91,10 @@ def _parse_slot(value, index):
         end = end or range_end
     start = _clock(start)
     end = _clock(end)
+    if start is None:
+        start = _minute_clock(value.get("startMinute"))
+    if end is None:
+        end = _minute_clock(value.get("endMinute"))
     if not start or not end or start >= end:
         return None
     name = value.get("name") or value.get("title") or value.get("label") or f"第{index}节"
@@ -125,9 +141,73 @@ def _group_by_day(values):
     return grouped
 
 
+def _policy_schedule_slots(schedule):
+    if not isinstance(schedule, dict):
+        return {}
+    grouped = {}
+    for slot in schedule.get("weeklySlots") or schedule.get("slots") or []:
+        if not isinstance(slot, dict):
+            continue
+        start = _minute_clock(slot.get("startMinute"))
+        end = _minute_clock(slot.get("endMinute"))
+        if not start or not end or start >= end:
+            continue
+        name = str(slot.get("name") or slot.get("id") or "节次")
+        weekdays = slot.get("weekdays") or slot.get("days") or [0]
+        if not isinstance(weekdays, (list, tuple)):
+            weekdays = [weekdays]
+        for day_value in weekdays:
+            day = _day_number(day_value)
+            if day is None:
+                continue
+            grouped.setdefault(day, []).append({
+                "name": name,
+                "start": start,
+                "end": end,
+                "period": None,
+                "dayOfWeek": day,
+            })
+    return grouped
+
+
+def _policy_document_slots(document):
+    if not isinstance(document, dict):
+        return {}
+    schedules = document.get("schedules") or document.get("schedule") or []
+    if isinstance(schedules, dict):
+        schedules = [schedules]
+    if not isinstance(schedules, list):
+        return {}
+    ordered = sorted(
+        [item for item in schedules if isinstance(item, dict)],
+        key=lambda item: 0 if item.get("scopeType") == "school" else 1,
+    )
+    for schedule in ordered:
+        grouped = _policy_schedule_slots(schedule)
+        if grouped:
+            return grouped
+    return {}
+
+
+def _policy_periods(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+    if not isinstance(value, dict):
+        return {}
+    return {0: _slot_list(value.get("periods") or [])} if _slot_list(value.get("periods") or []) else {}
+
+
 def parse_timeline_payload(payload):
     data = payload.get("data") if isinstance(payload, dict) and "data" in payload else payload
     if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and (item.get("name") == "class_periods" or item.get("key") == "class_periods"):
+                grouped = _policy_periods(item.get("value"))
+                if grouped:
+                    return grouped
         slots = _slot_list(data)
         if slots:
             grouped = _group_by_day(data)
@@ -135,6 +215,13 @@ def parse_timeline_payload(payload):
         raise TimelineServerError("时间线接口未返回可识别的节次时间")
     if not isinstance(data, dict):
         raise TimelineServerError("时间线接口返回格式异常")
+    policy = (
+        _policy_document_slots(data.get("document"))
+        or _policy_schedule_slots(data.get("schedule"))
+        or _policy_document_slots(data)
+    )
+    if policy:
+        return policy
     for key in ("days", "week", "weekdays", "schedule", "timetable"):
         value = data.get(key)
         if isinstance(value, dict):
@@ -201,21 +288,48 @@ def fetch_timeline(url, token=""):
     if not address:
         raise TimelineServerError("未设置时间线服务器地址")
     if not address.lower().startswith(("http://", "https://")):
-        address = "https://" + address
+        address = "http://" + address
+    parsed = urlparse(address)
+    base = f"{parsed.scheme}://{parsed.netloc}"
+    paths = [
+        "/api/public/teaching/timeline",
+        "/api/teaching/timeline",
+        "/api/timeline",
+        "/api/public/timeline",
+        "/api/class-periods",
+        "/api/policies/class_periods",
+        "/api/admin/teaching/draft",
+    ]
+    candidates = []
+    if parsed.path not in ("", "/"):
+        candidates.append(address)
+    candidates.extend(base + path for path in paths)
     headers = {"Accept": "application/json", "User-Agent": "ClassWidgets2-ChaoxingSync"}
     token = str(token or "").strip()
     if token:
         headers["Authorization"] = f"Bearer {token}"
         headers["access-token"] = token
-    try:
-        response = requests.get(address, headers=headers, timeout=(10, 30))
-        response.raise_for_status()
-        payload = response.json()
-    except ValueError as error:
-        raise TimelineServerError("时间线接口返回的不是 JSON") from error
-    except requests.RequestException as error:
-        raise TimelineServerError(f"请求时间线服务器失败：{error}") from error
-    grouped = parse_timeline_payload(payload)
-    for day in grouped:
-        grouped[day].sort(key=lambda slot: slot["start"])
-    return grouped
+    errors = []
+    for candidate in candidates:
+        try:
+            response = requests.get(candidate, headers=headers, timeout=(8, 20))
+            if response.status_code == 404:
+                errors.append(f"{candidate}: 404")
+                continue
+            if response.status_code in (401, 403):
+                errors.append(f"{candidate}: 需要鉴权")
+                continue
+            response.raise_for_status()
+            payload = response.json()
+            grouped = parse_timeline_payload(payload)
+            for day in grouped:
+                grouped[day].sort(key=lambda slot: slot["start"])
+            return grouped
+        except ValueError:
+            errors.append(f"{candidate}: 不是 JSON")
+        except requests.RequestException as error:
+            errors.append(f"{candidate}: {error}")
+        except TimelineServerError as error:
+            errors.append(f"{candidate}: {error}")
+    detail = "；".join(errors[-3:]) if errors else "未知错误"
+    raise TimelineServerError(f"无法从时间线服务器获取节次时间：{detail}")
