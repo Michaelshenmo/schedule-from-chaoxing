@@ -1,12 +1,12 @@
 {
-  "id": "com.classwidgets.plugin-template",
-  "name": "插件开发模板",
-  "version": "0.4.2",
-  "api_version": "~=0.4.2",
+  "id": "com.michaelshenmo.schedule-from-chaoxing",
+  "name": "超星学习通课表同步",
+  "version": "1.0.0",
+  "api_version": "~=0.7.0",
   "entry": "main.py",
-  "author": "RinLit",
-  "description": "支持 Class Widgets 2 插件的开发模板",
-  "url": "https://github.com/Class-Widgets/plugin-template-v2/",
+  "author": "Michaelshenmo",
+  "description": "从超星学习通自动拉取课表，并写入独立的 Class Widgets 2 课表",
+  "url": "https://github.com/Michaelshenmo/schedule-from-chaoxing",
   "readme": "README.md",
   "icon": "icon.png"
 }

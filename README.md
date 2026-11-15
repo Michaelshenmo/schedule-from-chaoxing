@@ -1,68 +1,75 @@
-   <div align="center">
+<div align="center">
 <img src="icon.png" width="15%" alt="Class Widgets 2">
-<h1>Class Widgets 2 Plugin Template</h1>
+<h1>超星学习通课表同步</h1>
 
-<p>Class Widgets 2 插件模板</p>
+<p>从超星学习通自动拉取课表，并写入独立的 Class Widgets 2 课表</p>
 
-<!--[![当前版本](https://img.shields.io/github/v/release/Class-Widgets/plugin-template-v2?style=for-the-badge&color=purple&label=%E5%BD%93%E5%89%8D%E7%89%88%E6%9C%AC)](https://github.com/Class-Widgets/plugin-template-v2/releases/latest)--->
-
-[![星标](https://img.shields.io/github/stars/Class-Widgets/plugin-template-v2?style=for-the-badge&color=orange&label=%E6%98%9F%E6%A0%87)](https://github.com/Class-Widgets/plugin-template-v2)
-[![开源许可](https://img.shields.io/badge/license-MIT-blue.svg?label=%E5%BC%80%E6%BA%90%E8%AE%B8%E5%8F%AF%E8%AF%81&style=for-the-badge)](https://github.com/Class-Widgets/plugin-template-v2)
-[![下载量](https://img.shields.io/github/downloads/Class-Widgets/plugin-template-v2/total.svg?label=%E4%B8%8B%E8%BD%BD%E9%87%8F&color=green&style=for-the-badge)](https://github.com/Class-Widgets/plugin-template-v2)
+[![星标](https://img.shields.io/github/stars/Michaelshenmo/schedule-from-chaoxing?style=for-the-badge&color=orange&label=%E6%98%9F%E6%A0%87)](https://github.com/Michaelshenmo/schedule-from-chaoxing)
+[![开源许可](https://img.shields.io/badge/license-MIT-blue.svg?label=%E5%BC%80%E6%BA%90%E8%AE%B8%E5%8F%AF%E8%AF%81&style=for-the-badge)](https://github.com/Michaelshenmo/schedule-from-chaoxing)
+[![下载量](https://img.shields.io/github/downloads/Michaelshenmo/schedule-from-chaoxing/total.svg?label=%E4%B8%8B%E8%BD%BD%E9%87%8F&color=green&style=for-the-badge)](https://github.com/Michaelshenmo/schedule-from-chaoxing)
 
 </div>
 
-> [!NOTE]
-> 
-> 本项目还处**在开发**阶段，API 接口可能随时发生变化，敬请谅解。
-> 
-> This project is still **in development**. The API may change at any time, so please bear with us.
-
 ## 介绍 / Introduction
-一个基于 [Class Widgets 2](https://github.com/rinlit-233-shiroko/class-widgets-2) 的插件模板。
+
+本插件基于 [Class Widgets 2 SDK](https://github.com/Class-Widgets/class-widgets-sdk)，通过超星学习通统一登录接口获取当前账号的课表，并生成一个独立的课表配置。
+
+- 使用超星学习通账号自动登录并拉取课表
+- 自动将课程、教师、地点、周次和上课时间转换为 Class Widgets 2 课表格式
+- 同步结果写入独立课表，不会覆盖或修改你正在使用的课表
+- 支持分别开关「同步课程」和「同步时间线」
+- 支持设置自动同步间隔，默认 20 分钟
+- 账号密码加密保存，设置页面不会回显已保存的账号
 
 ## 使用 / Usage
-1. 安装 [Class Widgets 2 SDK](https://github.com/Class-Widgets/class-widgets-sdk) 依赖 / 
-Install the [Class Widgets 2 SDK](https://github.com/Class-Widgets/class-widgets-sdk) dependencies
+
+1. 安装 [Class Widgets 2 SDK](https://github.com/Class-Widgets/class-widgets-sdk) 依赖：
+
 ```bash
 pip install class-widgets-sdk
 ```
 
-2. 在终端运行 `cw-plugin-pack` 以打包插件 /
-Run `cw-plugin-pack` to pack the plugin in the terminal
+2. 在终端运行 `cw-plugin-pack` 打包插件：
+
 ```bash
 cw-plugin-pack
 ```
 
-3. 在 Class Widgets 2 -> "设置" -> "插件"中导入打包好的插件 /
-Import the packed plugin in "Settings" -> "Plugins" in Class Widgets 2
+3. 在 Class Widgets 2 的「设置」→「插件」中导入并启用插件。
 
-## 自动发布 / Auto Release
-通过 GitHub Actions 实现自动发布功能，推送 tag 时自动生成 release。
+4. 打开「设置」→「插件」→「超星学习通」：
 
-### 使用方法 / How to Use
-1. 推送 tag 到 GitHub（格式：`v*.*.*`）：
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-```
+   - 输入超星学习通手机号/学号和密码，点击「保存并验证」
+   - 按需开启「同步课程」和「同步时间线」
+   - 设置自动同步间隔（默认 20 分钟）
+   - 可修改目标课表名称（默认「超星学习通」）
+   - 点击「立即同步」可手动同步一次
 
-2. 在 GitHub 仓库设置中添加 `CWPT_TOKEN` 密钥（从 [插件广场控制台](https://plaza.cw.rinlit.cn/console) 获取的发布令牌）
+5. 同步完成后，在 Class Widgets 2 的课表设置中切换到目标课表即可。
 
-3. GitHub Actions 会自动：
-   - 使用 `cw-plugin-pack` 打包插件
-   - 生成 `.cwplugin` 和 `.zip` 两种格式
-   - 通过 `cw-plugin-publish` 自动发布到插件广场
-   - 创建 GitHub Release 并上传发布包
+## 同步说明
 
-4. 在 GitHub Release 页面下载发布包，或直接在 Class Widgets 插件广场中安装
+- 插件会在课表目录中创建或更新独立课表，不会自动切换你当前正在使用的课表。
+- 如果目标课表名称已存在，且不是本插件创建的课表，插件会拒绝覆盖，请更换目标课表名称。
+- 目标课表由插件管理，手动修改会在下次同步时被覆盖。
+- 「同步课程」负责写入课程名称、教师、地点和课程颜色。
+- 「同步时间线」负责写入上课时间段和周次。
+- 两项都关闭时，自动同步会停止。
+- 如果超星学习通账号需要二次验证（如短信验证码），当前版本无法自动同步。
+
+## 账号安全
+
+- 账号密码不会以明文写入配置文件。
+- Windows 下优先使用 DPAPI 加密，密文只能由当前 Windows 用户解密。
+- 非 Windows 平台使用随机密钥加密，并校验数据完整性。
+- 设置页面不会读取或显示已保存的账号；重新设置时只能输入新的账号密码。
+- 插件不会上传账号信息到任何第三方服务器，仅用于登录超星学习通。
 
 ## 致谢 / Acknowledgements
-### 引用资源 / Credits
+
 - [Class Widgets 2](https://github.com/rinlit-233-shiroko/class-widgets-2)
 - [Class Widgets 2 SDK](https://github.com/Class-Widgets/class-widgets-sdk)
 
 ## 版权 / License
-本项目基于 MIT 协议开源，详情请参阅 [LICENSE](https://github.com/rinlit-233-shiroko/class-widgets-2-plugin-template/blob/main/LICENSE) 文件。
 
-The project is licensed under the MIT license. Please refer to the [LICENSE](https://github.com/rinlit-233-shiroko/class-widgets-2-plugin-template/blob/main/LICENSE) file for details.
+本项目基于 MIT 协议开源，详情请参阅 [LICENSE](LICENSE) 文件。

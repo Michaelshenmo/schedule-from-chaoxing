@@ -1,14 +1,24 @@
 [project]
-name = "com-rinlit-test"
+name = "schedule-from-chaoxing"
 version = "1.0.0"
-description = "A Class Widgets plugin."
+description = "从超星学习通自动拉取课表并写入独立的 Class Widgets 2 课表"
 authors = [
-    {name = "RinLit"},
+    {name = "Michaelshenmo"},
 ]
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["class-widgets-sdk>=0.4.2"]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "class-widgets-sdk>=0.7.0",
+    "requests>=2.28",
+]
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["chaoxing_sync"]
+py-modules = ["main"]
