@@ -90,7 +90,10 @@ class SyncThread(QThread):
             username, password = unprotect_account(self._encrypted_account)
             client = ChaoxingClient()
             client.login(username, password)
-            data = client.fetch_all_lessons()
+            data = client.fetch_all_lessons(
+                include_timetable=self._sync_timeline,
+                include_courses=self._sync_courses,
+            )
             schedule, info = build_schedule(data, self._sync_courses, self._sync_timeline)
             info["synced_at"] = datetime.now().isoformat(timespec="seconds")
             logger.info(
@@ -463,16 +466,31 @@ class Plugin(CW2Plugin):
         if self._closing:
             return
         schedule, info = result
-        detail = f"接口返回 {info.get('lesson_count', 0)} 条课程记录，{info.get('time_slot_count', 0)} 个节次时间"
+        detail = (
+            f"课程列表 {info.get('course_list_count', 0)} 条，"
+            f"课表记录 {info.get('lesson_count', 0)} 条，"
+            f"{info.get('time_slot_count', 0)} 个节次时间"
+        )
         failed_weeks = info.get("failed_weeks") or []
         if failed_weeks:
             detail += f"，{len(failed_weeks)} 个周次请求失败"
-        if info.get("sync_courses") and not info.get("course_count"):
+        requested_courses = bool(info.get("sync_courses"))
+        requested_timeline = bool(info.get("sync_timeline"))
+        has_courses = bool(info.get("course_count"))
+        has_timeline = bool(info.get("entry_count"))
+        if requested_courses and requested_timeline and not has_courses and not has_timeline:
+            self._on_sync_failed(f"未获取到课程或上课时间，已保留原课表（{detail}）", reason)
+            return
+        if requested_courses and not requested_timeline and not has_courses:
             self._on_sync_failed(f"未获取到课程数据，已保留原课表（{detail}）", reason)
             return
-        if info.get("sync_timeline") and not info.get("entry_count"):
+        if requested_timeline and not requested_courses and not has_timeline:
             self._on_sync_failed(f"未获取到可用的上课时间，已保留原课表（{detail}）", reason)
             return
+        partial = (
+            (requested_courses and not has_courses)
+            or (requested_timeline and not has_timeline)
+        )
         try:
             name, path, is_current = self._write_schedule(schedule)
         except Exception as error:
@@ -489,18 +507,24 @@ class Plugin(CW2Plugin):
         )
         if info.get("skipped_count"):
             message += f"，跳过 {info['skipped_count']} 条无效记录"
+        if requested_timeline and not has_timeline:
+            message += "；超星课表接口未返回上课时间，已仅同步课程"
+        if requested_courses and not has_courses:
+            message += "；未获取到课程列表"
         if failed_weeks:
             message += f"；{len(failed_weeks)} 个周次获取失败"
         if not is_current:
             message += "；可在课表设置中切换到该课表"
         self._set_status(message)
         logger.info(f"Chaoxing schedule synced to {path}")
+        suffix = "（部分）" if partial else ""
         title = {
-            "startup": "超星学习通启动同步完成",
-            "scheduled": "超星学习通定时同步完成",
-            "manual": "超星学习通同步完成",
-        }.get(reason, "超星学习通同步完成")
-        self._notify(reason, NotificationLevel.INFO, title, message)
+            "startup": f"超星学习通启动同步完成{suffix}",
+            "scheduled": f"超星学习通定时同步完成{suffix}",
+            "manual": f"超星学习通同步完成{suffix}",
+        }.get(reason, f"超星学习通同步完成{suffix}")
+        level = NotificationLevel.WARNING if partial else NotificationLevel.INFO
+        self._notify(reason, level, title, message)
 
     @Slot(str, str)
     def _on_sync_failed(self, message: str, reason: str):

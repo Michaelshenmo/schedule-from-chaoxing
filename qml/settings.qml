@@ -154,7 +154,7 @@ FluentPage {
 
             SettingItem {
                 title: "同步课程"
-                description: "将超星课程名称、教师和地点写入课表"
+                description: "从超星课程列表和课表写入课程名称、教师和地点"
 
                 Switch {
                     id: coursesSwitch
@@ -169,7 +169,7 @@ FluentPage {
 
             SettingItem {
                 title: "同步时间线"
-                description: "将上课时间写入课表时间线；关闭后只同步课程信息"
+                description: "从超星课表写入上课时间；超星课表为空时仅同步课程"
 
                 Switch {
                     id: timelineSwitch

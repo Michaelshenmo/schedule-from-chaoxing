@@ -11,6 +11,7 @@ LOGIN_PAGE = "https://passport2.chaoxing.com/login?fid=&newversion=true&refer=ht
 LOGIN_ENDPOINT = "https://passport2.chaoxing.com/fanyalogin"
 SCHEDULE_PAGE = "https://kb.chaoxing.com/res/pc/curriculum/schedule.html"
 LESSONS_ENDPOINT = "https://kb.chaoxing.com/pc/curriculum/getMyLessons"
+COURSE_LIST_ENDPOINT = "https://mooc1-api.chaoxing.com/mycourse/backclazzdata?view=json&rss=1"
 TRANSFER_KEY = b"u2oh6Vu^HWe4_AES"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -148,65 +149,123 @@ class ChaoxingClient:
             raise ChaoxingError(data.get("msg") or "获取课表失败")
         return data.get("data") or {}
 
-    def fetch_all_lessons(self) -> dict:
-        first = self._get_lessons()
-        curriculum = first.get("curriculum") or {}
-        if not isinstance(curriculum, dict) or not curriculum:
-            raise ChaoxingError("未获取到课表信息，请确认账号已加入课程")
-        try:
-            max_week = int(curriculum.get("maxWeek") or 20)
-        except (TypeError, ValueError):
-            max_week = 20
-        max_week = max(1, min(max_week, 60))
-        records = {}
-        failed_weeks = []
-        succeeded_weeks = 0
-        first_week_error = ""
-        for week in range(1, max_week + 1):
-            try:
-                payload = self._get_lessons(week)
-            except ChaoxingError as error:
-                failed_weeks.append(week)
-                if len(failed_weeks) == 1:
-                    first_week_error = str(error)
+    def fetch_courses(self) -> list:
+        data = self._get_json(
+            COURSE_LIST_ENDPOINT,
+            headers={
+                "Referer": "https://i.chaoxing.com/base",
+                "X-Requested-With": "XMLHttpRequest",
+                "Accept": "application/json, text/javascript, */*; q=0.01",
+            },
+            retries=1,
+        )
+        if not isinstance(data, dict):
+            raise ChaoxingError("获取课程列表失败：响应格式异常")
+        courses = {}
+        for channel in data.get("channelList") or []:
+            if not isinstance(channel, dict):
                 continue
-            succeeded_weeks += 1
-            for lesson in payload.get("lessonArray") or []:
-                if not isinstance(lesson, dict):
+            content = channel.get("content") or {}
+            course_data = ((content.get("course") or {}).get("data") or [])
+            for item in course_data:
+                if not isinstance(item, dict):
                     continue
-                key = (
-                    lesson.get("lessonConfigUuid") or "",
-                    lesson.get("name") or lesson.get("displayCourseName") or lesson.get("courseName"),
-                    lesson.get("dayOfWeek") or lesson.get("weekDay"),
-                    lesson.get("beginNumber") or lesson.get("startSection"),
-                    lesson.get("length") or lesson.get("sectionLength"),
-                    lesson.get("location") or lesson.get("classroom"),
-                    lesson.get("teacherName") or lesson.get("teacher"),
-                )
-                record = records.get(key)
+                name = str(item.get("name") or "").strip()
+                if not name:
+                    continue
+                teacher = str(item.get("teacherfactor") or "").strip()
+                record = courses.get(name)
                 if record is None:
-                    record = dict(lesson)
-                    record["_weeks"] = set()
-                    records[key] = record
-                lesson_weeks = _parse_weeks(
-                    lesson.get("weeks"),
-                    max_week,
-                    lesson.get("weekType"),
-                )
-                record["_weeks"].update(lesson_weeks or {week})
-        if succeeded_weeks == 0:
-            message = first_week_error or "所有周次的课表请求均失败"
-            raise ChaoxingError(f"获取课表失败：{message}")
+                    courses[name] = {
+                        "name": name,
+                        "teacher": teacher,
+                        "courseId": item.get("id"),
+                        "classId": content.get("id") or channel.get("key"),
+                        "image": item.get("imageurl"),
+                    }
+                elif teacher and not record.get("teacher"):
+                    record["teacher"] = teacher
+        return list(courses.values())
+
+    def fetch_all_lessons(self, include_timetable=True, include_courses=True) -> dict:
+        courses = []
+        course_error = ""
+        if include_courses:
+            try:
+                courses = self.fetch_courses()
+            except ChaoxingError as error:
+                course_error = str(error)
+        curriculum = {}
         lessons = []
-        for record in records.values():
-            record["weeks"] = sorted(record.pop("_weeks"))
-            lessons.append(record)
-        if not lessons and failed_weeks:
-            message = first_week_error or "部分周次请求失败"
-            raise ChaoxingError(f"未获取到课程数据：{message}")
+        failed_weeks = []
+        timetable_error = ""
+        max_week = 0
+        if include_timetable:
+            try:
+                first = self._get_lessons()
+                curriculum = first.get("curriculum") or {}
+                if not isinstance(curriculum, dict) or not curriculum:
+                    raise ChaoxingError("未获取到课表信息，请确认账号已加入课程")
+                try:
+                    max_week = int(curriculum.get("maxWeek") or 20)
+                except (TypeError, ValueError):
+                    max_week = 20
+                max_week = max(1, min(max_week, 60))
+                records = {}
+                succeeded_weeks = 0
+                first_week_error = ""
+                for week in range(1, max_week + 1):
+                    try:
+                        payload = self._get_lessons(week)
+                    except ChaoxingError as error:
+                        failed_weeks.append(week)
+                        if len(failed_weeks) == 1:
+                            first_week_error = str(error)
+                        continue
+                    succeeded_weeks += 1
+                    for lesson in payload.get("lessonArray") or []:
+                        if not isinstance(lesson, dict):
+                            continue
+                        key = (
+                            lesson.get("lessonConfigUuid") or "",
+                            lesson.get("name") or lesson.get("displayCourseName") or lesson.get("courseName"),
+                            lesson.get("dayOfWeek") or lesson.get("weekDay"),
+                            lesson.get("beginNumber") or lesson.get("startSection"),
+                            lesson.get("length") or lesson.get("sectionLength"),
+                            lesson.get("location") or lesson.get("classroom"),
+                            lesson.get("teacherName") or lesson.get("teacher"),
+                        )
+                        record = records.get(key)
+                        if record is None:
+                            record = dict(lesson)
+                            record["_weeks"] = set()
+                            records[key] = record
+                        lesson_weeks = _parse_weeks(
+                            lesson.get("weeks"),
+                            max_week,
+                            lesson.get("weekType"),
+                        )
+                        record["_weeks"].update(lesson_weeks or {week})
+                if succeeded_weeks == 0:
+                    raise ChaoxingError(first_week_error or "所有周次的课表请求均失败")
+                for record in records.values():
+                    record["weeks"] = sorted(record.pop("_weeks"))
+                    lessons.append(record)
+                if not lessons and failed_weeks:
+                    timetable_error = first_week_error or "部分周次请求失败"
+            except ChaoxingError as error:
+                timetable_error = str(error)
+                curriculum = {}
+                lessons = []
+        if not courses and not lessons:
+            message = timetable_error or course_error or "未获取到课程或课表数据"
+            raise ChaoxingError(message)
         return {
             "curriculum": curriculum,
             "lessons": lessons,
+            "courses": courses,
             "max_week": max_week,
             "failed_weeks": failed_weeks,
+            "timetable_error": timetable_error,
+            "course_error": course_error,
         }

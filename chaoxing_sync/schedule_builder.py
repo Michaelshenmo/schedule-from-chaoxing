@@ -208,21 +208,49 @@ def _lesson_times(lesson: dict, times):
 def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
     curriculum = data.get("curriculum") or {}
     lessons = data.get("lessons") or []
-    if not isinstance(curriculum, dict) or not isinstance(lessons, list):
+    courses = data.get("courses") or []
+    if not isinstance(curriculum, dict) or not isinstance(lessons, list) or not isinstance(courses, list):
         raise ScheduleBuildError("课表数据格式异常")
     times = parse_time_config(_extract_time_values(curriculum))
-    has_explicit_times = any(
-        lesson.get("startTime") or lesson.get("lessonBeginTime") or lesson.get("beginTime")
-        for lesson in lessons
-        if isinstance(lesson, dict)
-    )
-    if (not times or not any(times)) and not has_explicit_times:
-        raise ScheduleBuildError("未获取到节次时间配置，暂时无法生成课表")
 
     subjects = {}
+    subjects_by_name = {}
     timelines = {}
     entry_count = 0
     skipped = 0
+
+    def ensure_subject(name: str, teacher: str, location: str) -> str:
+        existing = subjects_by_name.get(name)
+        if existing is not None:
+            if teacher and not existing.get("teacher"):
+                existing["teacher"] = teacher
+            if location and not existing.get("location"):
+                existing["location"] = location
+            return existing["id"]
+        subject_key = f"{name}\x1f{teacher}"
+        subject_id = _stable_id("cx", subject_key)
+        subject = {
+            "id": subject_id,
+            "name": name,
+            "simplifiedName": _simplified_name(name),
+            "teacher": teacher or None,
+            "icon": "ic_fluent_book_20_regular",
+            "color": _pick_color(subject_key),
+            "location": location or None,
+            "isLocalClassroom": True,
+        }
+        subjects[subject_id] = subject
+        subjects_by_name[name] = subject
+        return subject_id
+
+    if sync_courses:
+        for course in courses:
+            if not isinstance(course, dict):
+                continue
+            name = str(course.get("name") or "").strip()
+            if not name:
+                continue
+            ensure_subject(name, str(course.get("teacher") or "").strip(), "")
 
     for lesson in lessons:
         if not isinstance(lesson, dict):
@@ -234,6 +262,14 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
             or lesson.get("courseName")
             or ""
         ).strip()
+        if not name:
+            skipped += 1
+            continue
+        teacher = str(lesson.get("teacherName") or lesson.get("teacher") or "").strip()
+        location = str(lesson.get("location") or lesson.get("classroom") or "").strip()
+        subject_id = ensure_subject(name, teacher, location) if sync_courses else ""
+        if not sync_timeline:
+            continue
         try:
             day = int(lesson.get("dayOfWeek") or lesson.get("weekDay") or 0)
         except (TypeError, ValueError):
@@ -248,34 +284,11 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
                 week_values.add(number)
         weeks = sorted(week_values)
         lesson_times = _lesson_times(lesson, times)
-        if not name or not (1 <= day <= 7) or not weeks or not lesson_times:
+        if not (1 <= day <= 7) or not weeks or not lesson_times:
             skipped += 1
             continue
         start, finish = lesson_times
-        teacher = str(lesson.get("teacherName") or lesson.get("teacher") or "").strip()
-        location = str(lesson.get("location") or lesson.get("classroom") or "").strip()
-        subject_key = f"{name}\x1f{teacher}"
-        subject_id = _stable_id("cx", subject_key)
-        entry_id = _stable_id("cxe", day, start, finish, subject_id)
-
-        if sync_courses:
-            subject = subjects.get(subject_id)
-            if subject is None:
-                subjects[subject_id] = {
-                    "id": subject_id,
-                    "name": name,
-                    "simplifiedName": _simplified_name(name),
-                    "teacher": teacher or None,
-                    "icon": "ic_fluent_book_20_regular",
-                    "color": _pick_color(subject_key),
-                    "location": location or None,
-                    "isLocalClassroom": True,
-                }
-            elif location and not subject.get("location"):
-                subject["location"] = location
-
-        if not sync_timeline:
-            continue
+        entry_id = _stable_id("cxe", day, start, finish, subject_id or name)
 
         timeline_key = (day, tuple(weeks))
         timeline = timelines.get(timeline_key)
@@ -333,10 +346,13 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
         "timeline_count": len(day_list),
         "skipped_count": skipped,
         "lesson_count": len(lessons),
+        "course_list_count": len(courses),
         "time_slot_count": len([slot for slot in times if slot]),
         "failed_weeks": list(data.get("failed_weeks") or []),
         "max_week": int(data.get("max_week") or 0),
         "sync_courses": bool(sync_courses),
         "sync_timeline": bool(sync_timeline),
+        "timetable_error": str(data.get("timetable_error") or ""),
+        "course_error": str(data.get("course_error") or ""),
     }
     return schedule, info
