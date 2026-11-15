@@ -713,6 +713,15 @@ class Plugin(CW2Plugin):
                 message += "；超星课表接口未返回上课时间，已仅同步课程"
         if requested_courses and not has_courses:
             message += "；未获取到课程列表"
+        source_label = {
+            "server": "admin-system",
+            "course": "超星课程接口",
+            "target": "目标课表",
+            "fallback": "内置节次时间",
+            "api": "超星课表接口",
+        }.get(str(info.get("timeline_source") or ""))
+        if source_label:
+            message += f"；时间线来源：{source_label}"
         if timeline_error:
             message += "；时间线服务器请求失败，已使用超星课程接口或目标课表时间线"
         if failed_weeks:

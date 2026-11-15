@@ -70,6 +70,7 @@ cw-plugin-pack
 - 设置时间线服务器后，插件会优先使用 admin-system 返回的节次时间；服务器不可用时会回退到超星课程接口自带时间线、目标课表时间线或内置节次时间，并在同步状态中提示。
 - 时间线接口支持常见的 `timeSlots`、`periods`、`days` 等字段，节次可包含 `name`、`start`/`end`、`period`、`dayOfWeek`；也支持 admin-system 教学策略中的 `schedules.weeklySlots`。
 - 插件会自动尝试 `服务端地址 + /api/public/teaching/timeline`、`/api/admin/teaching/draft` 等路径；admin-system 需要管理员令牌时，可在「访问令牌」中填写。
+- 如果 admin-system 还没有公开时间线接口，可把 [docs/admin-system-timeline-endpoint.py](docs/admin-system-timeline-endpoint.py) 中的路由加入 `admin-system/backend/routes/teaching.py`，之后插件只需填写服务器地址。
 - 课程读取方式与 android-app 一致：登录学习通后访问课表入口，再调用 `course.chaoxing.com/svcourse/new/timetable/getIssuedCourseInfo` 获取全部周次课程。
 - 示例：`{"data":{"timeSlots":[{"name":"第一节","start":"08:00","end":"08:40"}]}}`；按星期返回时可用 `{"data":{"days":{"1":[{"name":"第一节","start":"08:00","end":"08:40"}]}}}`。
 - 两项都关闭时，自动同步会停止。
