@@ -333,14 +333,9 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
     meta = existing_schedule.get("meta") if isinstance(existing_schedule, dict) else None
     if not isinstance(meta, dict):
         meta = {}
-    has_user_timeline = any(
-        isinstance(timeline, dict)
-        and not str(timeline.get("id") or "").startswith("chaoxing-timeline-")
-        for timeline in (existing_schedule.get("days") if isinstance(existing_schedule, dict) else []) or []
-    )
     meta_id = str(meta.get("id") or "chaoxing-excel")
     start_date = str(meta.get("startDate") or "2026-09-01")
-    if not has_user_timeline and meta_id.startswith("chaoxing-"):
+    if meta_id.startswith("chaoxing-") and start_date in ("", "2026-11-09"):
         start_date = "2026-09-01"
     max_cycle = int(meta.get("maxWeekCycle") or 2)
     schedule = {
