@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from enum import IntEnum
@@ -36,6 +36,9 @@ class PluginConfig(ConfigBaseModel):
     interval_minutes: int = 20
     schedule_name: str = DEFAULT_SCHEDULE_NAME
     last_sync_at: str = ""
+    notify_startup: bool = True
+    notify_scheduled: bool = False
+    notify_manual: bool = True
 
 
 class AccountCheckThread(QThread):
@@ -70,15 +73,15 @@ class AccountCheckThread(QThread):
 
 
 class SyncThread(QThread):
-    succeeded = Signal(object, bool)
-    failed = Signal(str, bool)
+    succeeded = Signal(object, str)
+    failed = Signal(str, str)
 
-    def __init__(self, encrypted_account: str, sync_courses: bool, sync_timeline: bool, manual: bool):
+    def __init__(self, encrypted_account: str, sync_courses: bool, sync_timeline: bool, reason: str):
         super().__init__()
         self._encrypted_account = encrypted_account
         self._sync_courses = sync_courses
         self._sync_timeline = sync_timeline
-        self._manual = manual
+        self._reason = reason
 
     def run(self):
         username = ""
@@ -90,9 +93,17 @@ class SyncThread(QThread):
             data = client.fetch_all_lessons()
             schedule, info = build_schedule(data, self._sync_courses, self._sync_timeline)
             info["synced_at"] = datetime.now().isoformat(timespec="seconds")
-            self.succeeded.emit((schedule, info), self._manual)
+            logger.info(
+                "Chaoxing fetched {} lesson groups across {} weeks ({} weeks failed, {} time slots)".format(
+                    info.get("lesson_count", 0),
+                    info.get("max_week", 0),
+                    len(info.get("failed_weeks") or []),
+                    info.get("time_slot_count", 0),
+                )
+            )
+            self.succeeded.emit((schedule, info), self._reason)
         except Exception as error:
-            self.failed.emit(str(error), self._manual)
+            self.failed.emit(str(error), self._reason)
         finally:
             username = ""
             password = ""
@@ -126,11 +137,15 @@ class Plugin(CW2Plugin):
         self._account_checking = False
         self._closing = False
         self._status = ""
+        self._account_message = ""
+        self._account_error = False
         self._current_interval = 0
 
     def on_load(self):
         super().on_load()
         self.api.config.register_plugin_model(self.pid, self.config)
+        if self.credentialsConfigured:
+            self._account_message = "已保存加密账号"
         icon = self.PATH / "icon.png"
         self._provider = self.api.notification.get_provider(
             self.pid,
@@ -147,7 +162,7 @@ class Plugin(CW2Plugin):
         self._timer.timeout.connect(self._auto_sync)
         self._apply_config()
         self._refresh_default_status()
-        QTimer.singleShot(5000, self._maybe_initial_sync)
+        QTimer.singleShot(3000, self._startup_sync)
         logger.info("Chaoxing schedule plugin loaded")
 
     def on_unload(self):
@@ -193,6 +208,26 @@ class Plugin(CW2Plugin):
     def accountChecking(self) -> bool:
         return self._account_checking
 
+    @Property(str, notify=accountStateChanged)
+    def accountMessage(self) -> str:
+        return self._account_message
+
+    @Property(bool, notify=accountStateChanged)
+    def accountError(self) -> bool:
+        return self._account_error
+
+    @Property(bool, notify=configChanged)
+    def notifyStartup(self) -> bool:
+        return bool(self.config.notify_startup)
+
+    @Property(bool, notify=configChanged)
+    def notifyScheduled(self) -> bool:
+        return bool(self.config.notify_scheduled)
+
+    @Property(bool, notify=configChanged)
+    def notifyManual(self) -> bool:
+        return bool(self.config.notify_manual)
+
     @Property(str, notify=statusChanged)
     def statusText(self) -> str:
         return self._status
@@ -213,14 +248,22 @@ class Plugin(CW2Plugin):
         username = str(username or "").strip()
         password = str(password or "")
         if not username or not password:
+            self._account_message = "请输入手机号/学号和密码"
+            self._account_error = True
+            self.accountStateChanged.emit()
             self._set_status("请输入手机号/学号和密码")
             return False
         if self._syncing:
+            self._account_message = "正在同步课表，请稍后再保存账号"
+            self._account_error = True
+            self.accountStateChanged.emit()
             self._set_status("正在同步课表，请稍后再保存账号")
             return False
         if self._account_checking or self._closing:
             return False
         self._account_checking = True
+        self._account_message = "正在验证账号，请稍候…"
+        self._account_error = False
         self.accountStateChanged.emit()
         self._set_status("正在验证账号，请稍候…")
         thread = AccountCheckThread(username, password)
@@ -237,6 +280,8 @@ class Plugin(CW2Plugin):
         if self._account_checking or self._syncing:
             return
         self.config.encrypted_account = ""
+        self._account_message = "已清除保存的账号"
+        self._account_error = False
         self.accountStateChanged.emit()
         self._apply_config()
         self._save_config()
@@ -277,9 +322,40 @@ class Plugin(CW2Plugin):
         self.configChanged.emit()
         self._set_status(f"目标课表名称已设置为「{value}」")
 
+    @Slot(bool)
+    def setNotifyStartup(self, enabled: bool):
+        self.config.notify_startup = bool(enabled)
+        self._save_config()
+        self.configChanged.emit()
+
+    @Slot(bool)
+    def setNotifyScheduled(self, enabled: bool):
+        self.config.notify_scheduled = bool(enabled)
+        self._save_config()
+        self.configChanged.emit()
+
+    @Slot(bool)
+    def setNotifyManual(self, enabled: bool):
+        self.config.notify_manual = bool(enabled)
+        self._save_config()
+        self.configChanged.emit()
+
     @Slot()
     def triggerSync(self):
-        self._start_sync(manual=True)
+        self._start_sync("manual")
+
+    @Slot(result=bool)
+    def switchToTargetSchedule(self) -> bool:
+        name = _sanitize_schedule_name(self.config.schedule_name)
+        schedules = self.api.schedulemanagement.list()
+        if not any(item.get("name") == name for item in schedules):
+            self._set_status(f"目标课表「{name}」不存在，请先同步")
+            return False
+        if self.api.schedulemanagement.switch(name):
+            self._set_status(f"已切换到课表「{name}」")
+            return True
+        self._set_status(f"切换到课表「{name}」失败")
+        return False
 
     def _set_status(self, text: str):
         if text == self._status:
@@ -315,37 +391,29 @@ class Plugin(CW2Plugin):
                 self._timer.stop()
         self.configChanged.emit()
 
-    def _maybe_initial_sync(self):
+    def _startup_sync(self):
         if self._closing or self._syncing or not self.autoSyncAllowed:
             return
-        value = str(self.config.last_sync_at or "")
-        due = True
-        if value:
-            try:
-                last = datetime.fromisoformat(value)
-                due = datetime.now() - last >= timedelta(minutes=self.intervalMinutes)
-            except ValueError:
-                due = True
-        if due:
-            self._start_sync(manual=False)
+        self._start_sync("startup")
 
     def _auto_sync(self):
         if self._closing or not self.autoSyncAllowed:
             return
-        self._start_sync(manual=False)
+        self._start_sync("scheduled")
 
-    def _start_sync(self, manual: bool):
+    def _start_sync(self, reason: str):
+        manual = reason == "manual"
         if self._closing or self._syncing or self._account_checking:
             return
         if not self.credentialsConfigured:
             self._set_status("请先设置超星学习通账号")
             if manual:
-                self._notify(NotificationLevel.WARNING, "超星学习通", "请先设置账号")
+                self._notify("manual", NotificationLevel.WARNING, "超星学习通", "请先设置账号")
             return
         if not (self.config.sync_courses or self.config.sync_timeline):
             self._set_status("同步课程与时间线均已关闭，自动同步已停止")
             if manual:
-                self._notify(NotificationLevel.WARNING, "超星学习通", "请至少开启同步课程或同步时间线")
+                self._notify("manual", NotificationLevel.WARNING, "超星学习通", "请至少开启同步课程或同步时间线")
             return
         self._syncing = True
         self.syncStateChanged.emit()
@@ -354,7 +422,7 @@ class Plugin(CW2Plugin):
             self.config.encrypted_account,
             bool(self.config.sync_courses),
             bool(self.config.sync_timeline),
-            manual,
+            reason,
         )
         thread.succeeded.connect(self._on_sync_success)
         thread.failed.connect(self._on_sync_failed)
@@ -368,13 +436,15 @@ class Plugin(CW2Plugin):
         if self._closing:
             return
         self._account_checking = False
+        self._account_message = "账号验证成功，已加密保存"
+        self._account_error = False
         self.config.encrypted_account = encrypted_account
         self.config.last_sync_at = ""
         self.accountStateChanged.emit()
         self._apply_config()
         self._save_config()
         self._set_status("账号验证成功，已加密保存；重新输入可覆盖旧账号")
-        QTimer.singleShot(1000, self._maybe_initial_sync)
+        QTimer.singleShot(1000, self._startup_sync)
         logger.info("Chaoxing account saved")
 
     @Slot(str)
@@ -382,18 +452,31 @@ class Plugin(CW2Plugin):
         if self._closing:
             return
         self._account_checking = False
+        self._account_message = f"账号验证失败：{message}"
+        self._account_error = True
         self.accountStateChanged.emit()
         self._set_status(f"账号验证失败：{message}")
+        logger.warning(f"Chaoxing account validation failed: {message}")
 
-    @Slot(object, bool)
-    def _on_sync_success(self, result, manual: bool):
+    @Slot(object, str)
+    def _on_sync_success(self, result, reason: str):
         if self._closing:
             return
         schedule, info = result
+        detail = f"接口返回 {info.get('lesson_count', 0)} 条课程记录，{info.get('time_slot_count', 0)} 个节次时间"
+        failed_weeks = info.get("failed_weeks") or []
+        if failed_weeks:
+            detail += f"，{len(failed_weeks)} 个周次请求失败"
+        if info.get("sync_courses") and not info.get("course_count"):
+            self._on_sync_failed(f"未获取到课程数据，已保留原课表（{detail}）", reason)
+            return
+        if info.get("sync_timeline") and not info.get("entry_count"):
+            self._on_sync_failed(f"未获取到可用的上课时间，已保留原课表（{detail}）", reason)
+            return
         try:
             name, path, is_current = self._write_schedule(schedule)
         except Exception as error:
-            self._on_sync_failed(f"保存课表失败：{error}", manual)
+            self._on_sync_failed(f"保存课表失败：{error}", reason)
             return
         self.config.last_sync_at = info.get("synced_at") or datetime.now().isoformat(timespec="seconds")
         self._save_config()
@@ -406,23 +489,33 @@ class Plugin(CW2Plugin):
         )
         if info.get("skipped_count"):
             message += f"，跳过 {info['skipped_count']} 条无效记录"
+        if failed_weeks:
+            message += f"；{len(failed_weeks)} 个周次获取失败"
         if not is_current:
             message += "；可在课表设置中切换到该课表"
         self._set_status(message)
         logger.info(f"Chaoxing schedule synced to {path}")
-        if manual:
-            self._notify(NotificationLevel.INFO, "超星学习通同步完成", message)
+        title = {
+            "startup": "超星学习通启动同步完成",
+            "scheduled": "超星学习通定时同步完成",
+            "manual": "超星学习通同步完成",
+        }.get(reason, "超星学习通同步完成")
+        self._notify(reason, NotificationLevel.INFO, title, message)
 
-    @Slot(str, bool)
-    def _on_sync_failed(self, message: str, manual: bool):
+    @Slot(str, str)
+    def _on_sync_failed(self, message: str, reason: str):
         if self._closing:
             return
         self._syncing = False
         self.syncStateChanged.emit()
         self._set_status(f"同步失败：{message}")
         logger.warning(f"Chaoxing schedule sync failed: {message}")
-        if manual:
-            self._notify(NotificationLevel.WARNING, "超星学习通同步失败", message)
+        title = {
+            "startup": "超星学习通启动同步失败",
+            "scheduled": "超星学习通定时同步失败",
+            "manual": "超星学习通同步失败",
+        }.get(reason, "超星学习通同步失败")
+        self._notify(reason, NotificationLevel.WARNING, title, message)
 
     def _write_schedule(self, schedule: dict):
         name = _sanitize_schedule_name(self.config.schedule_name)
@@ -466,8 +559,15 @@ class Plugin(CW2Plugin):
             self.api.schedule.reload()
         return name, path, is_current
 
-    def _notify(self, level, title: str, message: str):
+    def _notify(self, reason: str, level, title: str, message: str):
         if self._provider is None:
+            return
+        enabled = {
+            "startup": self.config.notify_startup,
+            "scheduled": self.config.notify_scheduled,
+            "manual": self.config.notify_manual,
+        }.get(reason, True)
+        if not enabled:
             return
         try:
             self._provider.push(level, title, message, 5000, True)

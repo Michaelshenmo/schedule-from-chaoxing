@@ -6,7 +6,7 @@ import RinUI
 FluentPage {
     id: page
     title: "超星学习通"
-    property string pluginId: "com.michaelshenmo.schedule-from-chaoxing"
+    property string pluginId: "com.msyark.chaoxingsync"
     property var backend: PluginBackendBridge.get_backend(pluginId)
     property bool ready: false
 
@@ -19,6 +19,9 @@ FluentPage {
         timelineSwitch.checked = backend.syncTimeline
         intervalSpin.value = backend.intervalMinutes
         nameField.text = backend.scheduleName
+        notifyStartupSwitch.checked = backend.notifyStartup
+        notifyScheduledSwitch.checked = backend.notifyScheduled
+        notifyManualSwitch.checked = backend.notifyManual
         ready = true
     }
 
@@ -97,29 +100,44 @@ FluentPage {
                     ? "正在验证账号，请稍候…"
                     : "保存前会先验证登录，成功后加密存储"
 
-                RowLayout {
-                    spacing: 8
+                ColumnLayout {
+                    spacing: 6
 
-                    Button {
-                        text: "保存并验证"
-                        highlighted: true
-                        enabled: backend
-                            && !backend.accountChecking
-                            && !backend.syncing
-                            && phoneField.text.length > 0
-                            && passwordField.text.length > 0
-                        onClicked: {
-                            if (backend.saveAccount(phoneField.text, passwordField.text)) {
-                                phoneField.text = ""
-                                passwordField.text = ""
+                    RowLayout {
+                        spacing: 8
+
+                        Button {
+                            text: "保存并验证"
+                            highlighted: true
+                            enabled: backend
+                                && !backend.accountChecking
+                                && !backend.syncing
+                                && phoneField.text.length > 0
+                                && passwordField.text.length > 0
+                            onClicked: {
+                                if (backend.saveAccount(phoneField.text, passwordField.text)) {
+                                    phoneField.text = ""
+                                    passwordField.text = ""
+                                }
                             }
+                        }
+
+                        Button {
+                            text: "清除账号"
+                            enabled: backend && backend.credentialsConfigured && !backend.accountChecking && !backend.syncing
+                            onClicked: backend.clearAccount()
                         }
                     }
 
-                    Button {
-                        text: "清除账号"
-                        enabled: backend && backend.credentialsConfigured && !backend.accountChecking && !backend.syncing
-                        onClicked: backend.clearAccount()
+                    Text {
+                        Layout.fillWidth: true
+                        typography: Typography.Caption
+                        wrapMode: Text.Wrap
+                        visible: text.length > 0
+                        text: backend ? backend.accountMessage : ""
+                        color: backend && backend.accountError
+                            ? "#C42B1C"
+                            : Theme.currentTheme.colors.textSecondaryColor
                     }
                 }
             }
@@ -195,6 +213,70 @@ FluentPage {
                     onEditingFinished: {
                         if (backend) {
                             backend.setScheduleName(text)
+                        }
+                    }
+                }
+            }
+
+            SettingItem {
+                title: "查看目标课表"
+                description: "切换到插件生成的课表查看同步结果"
+
+                Button {
+                    text: "切换课表"
+                    enabled: backend && backend.credentialsConfigured && !backend.syncing
+                    onClicked: backend.switchToTargetSchedule()
+                }
+            }
+        }
+
+        SettingExpander {
+            Layout.fillWidth: true
+            expanded: false
+            icon.name: "ic_fluent_alert_20_regular"
+            title: "通知选项"
+            description: "分别控制启动时、定时和手动同步的通知"
+
+            SettingItem {
+                title: "启动时自动同步"
+                description: "Class Widgets 启动后自动同步一次并发送通知"
+
+                Switch {
+                    id: notifyStartupSwitch
+                    checked: backend ? backend.notifyStartup : true
+                    onCheckedChanged: {
+                        if (page.ready && backend) {
+                            backend.setNotifyStartup(checked)
+                        }
+                    }
+                }
+            }
+
+            SettingItem {
+                title: "定时自动同步"
+                description: "按设定间隔自动同步并发送通知"
+
+                Switch {
+                    id: notifyScheduledSwitch
+                    checked: backend ? backend.notifyScheduled : false
+                    onCheckedChanged: {
+                        if (page.ready && backend) {
+                            backend.setNotifyScheduled(checked)
+                        }
+                    }
+                }
+            }
+
+            SettingItem {
+                title: "手动同步"
+                description: "点击「立即同步」后发送通知"
+
+                Switch {
+                    id: notifyManualSwitch
+                    checked: backend ? backend.notifyManual : true
+                    onCheckedChanged: {
+                        if (page.ready && backend) {
+                            backend.setNotifyManual(checked)
                         }
                     }
                 }

@@ -10,7 +10,7 @@ from pathlib import Path
 from .aes import decrypt_cbc, encrypt_cbc
 
 
-PLUGIN_ID = "com.michaelshenmo.schedule-from-chaoxing"
+PLUGIN_ID = "com.msyark.chaoxingsync"
 DPAPI_PREFIX = "dpapi1:"
 AES_PREFIX = "aes1:"
 

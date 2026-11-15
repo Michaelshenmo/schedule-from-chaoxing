@@ -1,4 +1,5 @@
 import hashlib
+import json
 import re
 from datetime import date, datetime, timedelta
 
@@ -44,21 +45,99 @@ def _normalize_time(hour, minute) -> str:
     return f"{hour:02d}:{minute:02d}"
 
 
+def _parse_clock(value):
+    if value is None:
+        return None
+    match = re.search(r"(\d{1,2})\s*[:：]\s*(\d{1,2})", str(value))
+    if not match:
+        return None
+    try:
+        return _normalize_time(match.group(1), match.group(2))
+    except ValueError:
+        return None
+
+
+def _parse_time_value(value):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        start = value.get("startTime") or value.get("start") or value.get("beginTime")
+        end = value.get("endTime") or value.get("end") or value.get("finishTime")
+        if start and end:
+            start_time = _parse_clock(start)
+            end_time = _parse_clock(end)
+            if start_time and end_time:
+                return start_time, end_time
+        return None
+    match = TIME_PATTERN.search(str(value))
+    if match:
+        try:
+            return _normalize_time(match.group(1), match.group(2)), _normalize_time(match.group(3), match.group(4))
+        except ValueError:
+            return None
+    single = _parse_clock(value)
+    return single, single if single else None
+
+
 def parse_time_config(values):
     result = []
     for value in values or []:
-        match = TIME_PATTERN.search(str(value))
-        if not match:
+        parsed = _parse_time_value(value)
+        if isinstance(parsed, tuple) and len(parsed) == 2 and parsed[0] and parsed[1]:
+            result.append({"start": parsed[0], "end": parsed[1]})
+        else:
             result.append(None)
-            continue
-        try:
-            start = _normalize_time(match.group(1), match.group(2))
-            end = _normalize_time(match.group(3), match.group(4))
-        except ValueError:
-            result.append(None)
-            continue
-        result.append({"start": start, "end": end})
     return result
+
+
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, dict):
+        if any(key in value for key in ("startTime", "start", "beginTime", "endTime", "end")):
+            return [value]
+        ordered_keys = sorted(value, key=lambda key: int(key) if str(key).isdigit() else str(key))
+        return [value[key] for key in ordered_keys]
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith(("[", "{")):
+            try:
+                return _as_list(json.loads(text))
+            except (TypeError, ValueError):
+                pass
+        for separator in ("，", ",", "；", ";"):
+            if separator in text:
+                return [part.strip() for part in text.split(separator) if part.strip()]
+        return [text]
+    return []
+
+
+def _extract_time_values(curriculum):
+    values = _as_list(curriculum.get("lessonTimeConfigArray"))
+    if values:
+        return values
+    campus_configs = _as_list(curriculum.get("campusLessonTimeConfigArray"))
+    best = []
+    for item in campus_configs:
+        if not isinstance(item, dict):
+            continue
+        candidate = _as_list(item.get("timeConfig") or item.get("lessonTimeConfigArray"))
+        if len(candidate) > len(best):
+            best = candidate
+    if best:
+        return best
+    for key in ("sectionTime", "timeConfig"):
+        values = _as_list(curriculum.get(key))
+        if values:
+            return values
+    values = []
+    for key in ("earlyMorningTime", "morningTime", "afternoonTime", "eveningTime"):
+        values.extend(_as_list(curriculum.get(key)))
+    return values
 
 
 def _start_date(curriculum: dict) -> str:
@@ -71,7 +150,14 @@ def _start_date(curriculum: dict) -> str:
             start = datetime.fromtimestamp(value).date()
             return (start - timedelta(days=start.weekday())).isoformat()
         except (OSError, OverflowError, TypeError, ValueError):
-            pass
+            text = str(timestamp)
+            match = re.search(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})", text)
+            if match:
+                try:
+                    start = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+                    return (start - timedelta(days=start.weekday())).isoformat()
+                except ValueError:
+                    pass
     try:
         current_week = int(curriculum.get("realCurrentWeek") or curriculum.get("currentWeek") or 1)
     except (TypeError, ValueError):
@@ -88,9 +174,19 @@ def _simplified_name(name: str) -> str:
 
 
 def _lesson_times(lesson: dict, times):
+    explicit_pairs = (
+        ("startTime", "endTime"),
+        ("lessonBeginTime", "lessonEndTime"),
+        ("beginTime", "finishTime"),
+    )
+    for start_key, end_key in explicit_pairs:
+        start = _parse_clock(lesson.get(start_key))
+        finish = _parse_clock(lesson.get(end_key))
+        if start and finish and start < finish:
+            return start, finish
     try:
-        begin = int(lesson.get("beginNumber") or 0)
-        length = int(lesson.get("length") or 1)
+        begin = int(lesson.get("beginNumber") or lesson.get("startSection") or 0)
+        length = int(lesson.get("length") or lesson.get("sectionLength") or 1)
     except (TypeError, ValueError):
         return None
     if begin < 1 or length < 1:
@@ -114,8 +210,13 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
     lessons = data.get("lessons") or []
     if not isinstance(curriculum, dict) or not isinstance(lessons, list):
         raise ScheduleBuildError("课表数据格式异常")
-    times = parse_time_config(curriculum.get("lessonTimeConfigArray"))
-    if not times or not any(times):
+    times = parse_time_config(_extract_time_values(curriculum))
+    has_explicit_times = any(
+        lesson.get("startTime") or lesson.get("lessonBeginTime") or lesson.get("beginTime")
+        for lesson in lessons
+        if isinstance(lesson, dict)
+    )
+    if (not times or not any(times)) and not has_explicit_times:
         raise ScheduleBuildError("未获取到节次时间配置，暂时无法生成课表")
 
     subjects = {}
@@ -127,9 +228,14 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
         if not isinstance(lesson, dict):
             skipped += 1
             continue
-        name = str(lesson.get("name") or "").strip()
+        name = str(
+            lesson.get("name")
+            or lesson.get("displayCourseName")
+            or lesson.get("courseName")
+            or ""
+        ).strip()
         try:
-            day = int(lesson.get("dayOfWeek") or 0)
+            day = int(lesson.get("dayOfWeek") or lesson.get("weekDay") or 0)
         except (TypeError, ValueError):
             day = 0
         week_values = set()
@@ -146,8 +252,8 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
             skipped += 1
             continue
         start, finish = lesson_times
-        teacher = str(lesson.get("teacherName") or "").strip()
-        location = str(lesson.get("location") or "").strip()
+        teacher = str(lesson.get("teacherName") or lesson.get("teacher") or "").strip()
+        location = str(lesson.get("location") or lesson.get("classroom") or "").strip()
         subject_key = f"{name}\x1f{teacher}"
         subject_id = _stable_id("cx", subject_key)
         entry_id = _stable_id("cxe", day, start, finish, subject_id)
@@ -226,6 +332,11 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
         "entry_count": entry_count,
         "timeline_count": len(day_list),
         "skipped_count": skipped,
+        "lesson_count": len(lessons),
+        "time_slot_count": len([slot for slot in times if slot]),
+        "failed_weeks": list(data.get("failed_weeks") or []),
         "max_week": int(data.get("max_week") or 0),
+        "sync_courses": bool(sync_courses),
+        "sync_timeline": bool(sync_timeline),
     }
     return schedule, info

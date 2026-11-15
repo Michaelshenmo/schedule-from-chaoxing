@@ -1,4 +1,5 @@
 import base64
+import re
 import time
 
 import requests
@@ -28,6 +29,40 @@ class AuthError(ChaoxingError):
 def _encrypt_field(value: str) -> str:
     encrypted = encrypt_cbc(TRANSFER_KEY, TRANSFER_KEY, value.encode("utf-8"))
     return base64.b64encode(encrypted).decode("ascii")
+
+
+def _parse_weeks(value, max_week: int, week_type=None):
+    if isinstance(value, (list, tuple, set)):
+        numbers = {int(item) for item in value if str(item).strip().isdigit()}
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return set()
+        numbers = set()
+        for token in re.findall(r"\d+\s*[-~—至]\s*\d+|\d+", text):
+            if re.search(r"[-~—至]", token):
+                start, end = re.split(r"[-~—至]", token, maxsplit=1)
+                try:
+                    start_number = int(start)
+                    end_number = int(end)
+                except ValueError:
+                    continue
+                if start_number > end_number:
+                    start_number, end_number = end_number, start_number
+                numbers.update(range(start_number, end_number + 1))
+            else:
+                try:
+                    numbers.add(int(token))
+                except ValueError:
+                    continue
+        if "单" in text:
+            numbers = {number for number in numbers if number % 2 == 1}
+        elif "双" in text:
+            numbers = {number for number in numbers if number % 2 == 0}
+        elif str(week_type) in ("0", "1"):
+            parity = 1 if str(week_type) == "0" else 0
+            numbers = {number for number in numbers if number % 2 == parity}
+    return {number for number in numbers if 1 <= number <= max_week}
 
 
 class ChaoxingClient:
@@ -124,32 +159,54 @@ class ChaoxingClient:
             max_week = 20
         max_week = max(1, min(max_week, 60))
         records = {}
+        failed_weeks = []
+        succeeded_weeks = 0
+        first_week_error = ""
         for week in range(1, max_week + 1):
-            payload = self._get_lessons(week)
+            try:
+                payload = self._get_lessons(week)
+            except ChaoxingError as error:
+                failed_weeks.append(week)
+                if len(failed_weeks) == 1:
+                    first_week_error = str(error)
+                continue
+            succeeded_weeks += 1
             for lesson in payload.get("lessonArray") or []:
                 if not isinstance(lesson, dict):
                     continue
                 key = (
                     lesson.get("lessonConfigUuid") or "",
-                    lesson.get("name"),
-                    lesson.get("dayOfWeek"),
-                    lesson.get("beginNumber"),
-                    lesson.get("length"),
-                    lesson.get("location"),
-                    lesson.get("teacherName"),
+                    lesson.get("name") or lesson.get("displayCourseName") or lesson.get("courseName"),
+                    lesson.get("dayOfWeek") or lesson.get("weekDay"),
+                    lesson.get("beginNumber") or lesson.get("startSection"),
+                    lesson.get("length") or lesson.get("sectionLength"),
+                    lesson.get("location") or lesson.get("classroom"),
+                    lesson.get("teacherName") or lesson.get("teacher"),
                 )
                 record = records.get(key)
                 if record is None:
                     record = dict(lesson)
                     record["_weeks"] = set()
                     records[key] = record
-                record["_weeks"].add(week)
+                lesson_weeks = _parse_weeks(
+                    lesson.get("weeks"),
+                    max_week,
+                    lesson.get("weekType"),
+                )
+                record["_weeks"].update(lesson_weeks or {week})
+        if succeeded_weeks == 0:
+            message = first_week_error or "所有周次的课表请求均失败"
+            raise ChaoxingError(f"获取课表失败：{message}")
         lessons = []
         for record in records.values():
             record["weeks"] = sorted(record.pop("_weeks"))
             lessons.append(record)
+        if not lessons and failed_weeks:
+            message = first_week_error or "部分周次请求失败"
+            raise ChaoxingError(f"未获取到课程数据：{message}")
         return {
             "curriculum": curriculum,
             "lessons": lessons,
             "max_week": max_week,
+            "failed_weeks": failed_weeks,
         }
