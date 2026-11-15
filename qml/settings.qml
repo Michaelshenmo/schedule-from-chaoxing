@@ -21,6 +21,8 @@ FluentPage {
         nameField.text = backend.scheduleName
         timetableFileField.text = backend.timetableFile
         timetableUrlField.text = backend.timetableUrl
+        timelineServerUrlField.text = backend.timelineServerUrl
+        timelineServerTokenField.text = backend.timelineServerToken
         notifyStartupSwitch.checked = backend.notifyStartup
         notifyScheduledSwitch.checked = backend.notifyScheduled
         notifyManualSwitch.checked = backend.notifyManual
@@ -208,11 +210,54 @@ FluentPage {
         SettingExpander {
             Layout.fillWidth: true
             expanded: true
+            icon.name: "ic_fluent_clock_20_regular"
+            title: "时间线服务器"
+            description: "从自建服务器拉取节次时间；课程仍来自课表文件或超星"
+
+            SettingItem {
+                title: "服务器地址"
+                description: "填写 admin-system 提供的时间线接口完整地址"
+
+                TextField {
+                    id: timelineServerUrlField
+                    Layout.preferredWidth: 250
+                    placeholderText: "https://example.com/api/timeline"
+                    selectByMouse: true
+                    onEditingFinished: {
+                        if (backend) {
+                            backend.setTimelineServerUrl(text)
+                        }
+                    }
+                }
+            }
+
+            SettingItem {
+                title: "访问令牌"
+                description: "接口需要鉴权时填写；不需要可留空"
+
+                TextField {
+                    id: timelineServerTokenField
+                    Layout.preferredWidth: 250
+                    placeholderText: "可选"
+                    echoMode: TextInput.Password
+                    selectByMouse: true
+                    onEditingFinished: {
+                        if (backend) {
+                            backend.setTimelineServerToken(text)
+                        }
+                    }
+                }
+            }
+        }
+
+        SettingExpander {
+            Layout.fillWidth: true
+            expanded: true
             icon.name: "ic_fluent_arrow_sync_20_regular"
             title: "自动同步"
             description: backend && backend.autoSyncAllowed
                 ? "自动同步已开启"
-                : "自动同步未开启：需要先保存账号或选择课表文件，并至少开启同步课程或同步时间线"
+                : "自动同步未开启：需要先保存账号、选择课表文件或填写下载地址，并至少开启同步课程或同步时间线"
 
             SettingItem {
                 title: "同步课程"
@@ -231,7 +276,7 @@ FluentPage {
 
             SettingItem {
                 title: "同步时间线"
-                description: "开启时补全时间线；关闭时仍会按目标课表已有时间线填充课程"
+                description: "开启时补全时间线；关闭时按目标课表或服务器时间线填充课程"
 
                 Switch {
                     id: timelineSwitch

@@ -25,6 +25,7 @@ except ImportError:
 from chaoxing_sync.client import ChaoxingClient
 from chaoxing_sync.credentials import protect_account, unprotect_account
 from chaoxing_sync.schedule_builder import build_schedule
+from chaoxing_sync.timeline_server import fetch_timeline
 from chaoxing_sync.xlsx_timetable import build_xlsx_schedule, parse_timetable_xlsx
 
 
@@ -41,6 +42,8 @@ class PluginConfig(ConfigBaseModel):
     schedule_name: str = DEFAULT_SCHEDULE_NAME
     timetable_file: str = ""
     timetable_url: str = ""
+    timeline_server_url: str = ""
+    timeline_server_token: str = ""
     last_sync_at: str = ""
     notify_startup: bool = True
     notify_scheduled: bool = False
@@ -90,6 +93,8 @@ class SyncThread(QThread):
         reason: str,
         timetable_file: str = "",
         timetable_url: str = "",
+        timeline_server_url: str = "",
+        timeline_server_token: str = "",
         existing_schedule=None,
     ):
         super().__init__()
@@ -99,6 +104,8 @@ class SyncThread(QThread):
         self._reason = reason
         self._timetable_file = timetable_file
         self._timetable_url = timetable_url
+        self._timeline_server_url = timeline_server_url
+        self._timeline_server_token = timeline_server_token
         self._existing_schedule = existing_schedule or {}
 
     def _download_timetable(self, url: str) -> Path:
@@ -127,7 +134,18 @@ class SyncThread(QThread):
         username = ""
         password = ""
         temp_file = None
+        server_timeline = {}
+        timeline_error = ""
         try:
+            if self._timeline_server_url:
+                try:
+                    server_timeline = fetch_timeline(
+                        self._timeline_server_url,
+                        self._timeline_server_token,
+                    )
+                except Exception as error:
+                    timeline_error = str(error)
+                    logger.warning(f"Timeline server request failed: {error}")
             source_file = self._timetable_file
             if not source_file and self._timetable_url:
                 temp_file = self._download_timetable(self._timetable_url)
@@ -139,8 +157,10 @@ class SyncThread(QThread):
                     self._existing_schedule,
                     self._sync_courses,
                     self._sync_timeline,
+                    server_timeline,
                 )
                 info["synced_at"] = datetime.now().isoformat(timespec="seconds")
+                info["timeline_error"] = timeline_error
                 logger.info(
                     "Parsed timetable file {} ({} blocks, {} subjects, {} entries)".format(
                         source_file,
@@ -158,8 +178,15 @@ class SyncThread(QThread):
                 include_timetable=self._sync_timeline,
                 include_courses=self._sync_courses,
             )
-            schedule, info = build_schedule(data, self._sync_courses, self._sync_timeline)
+            data["timeline_error"] = timeline_error
+            schedule, info = build_schedule(
+                data,
+                self._sync_courses,
+                self._sync_timeline,
+                server_timeline,
+            )
             info["synced_at"] = datetime.now().isoformat(timespec="seconds")
+            info["timeline_error"] = timeline_error
             logger.info(
                 "Chaoxing fetched {} lesson groups across {} weeks ({} weeks failed, {} time slots)".format(
                     info.get("lesson_count", 0),
@@ -284,6 +311,14 @@ class Plugin(CW2Plugin):
     @Property(str, notify=configChanged)
     def timetableUrl(self) -> str:
         return str(self.config.timetable_url or "")
+
+    @Property(str, notify=configChanged)
+    def timelineServerUrl(self) -> str:
+        return str(self.config.timeline_server_url or "")
+
+    @Property(str, notify=configChanged)
+    def timelineServerToken(self) -> str:
+        return str(self.config.timeline_server_token or "")
 
     @Property(bool, notify=syncStateChanged)
     def syncing(self) -> bool:
@@ -453,6 +488,23 @@ class Plugin(CW2Plugin):
             else "已清除课表文件下载地址"
         )
 
+    @Slot(str)
+    def setTimelineServerUrl(self, url: str):
+        self.config.timeline_server_url = str(url or "").strip()
+        self._save_config()
+        self.configChanged.emit()
+        self._apply_config()
+        self._set_status(
+            "已设置时间线服务器地址" if self.config.timeline_server_url
+            else "已清除时间线服务器地址"
+        )
+
+    @Slot(str)
+    def setTimelineServerToken(self, token: str):
+        self.config.timeline_server_token = str(token or "").strip()
+        self._save_config()
+        self.configChanged.emit()
+
     @Slot()
     def clearTimetableFile(self):
         self.config.timetable_file = ""
@@ -553,6 +605,8 @@ class Plugin(CW2Plugin):
             reason,
             timetable_file,
             timetable_url,
+            str(self.config.timeline_server_url or "").strip(),
+            str(self.config.timeline_server_token or "").strip(),
             existing_schedule,
         )
         thread.succeeded.connect(self._on_sync_success)
@@ -616,9 +670,11 @@ class Plugin(CW2Plugin):
         if requested_timeline and not requested_courses and not has_timeline:
             self._on_sync_failed(f"未获取到可用的上课时间，已保留原课表（{detail}）", reason)
             return
+        timeline_error = str(info.get("timeline_error") or "")
         partial = (
             (requested_courses and not has_courses)
             or (requested_timeline and not has_timeline)
+            or bool(timeline_error)
         )
         try:
             name, path, is_current = self._write_schedule(
@@ -647,6 +703,8 @@ class Plugin(CW2Plugin):
                 message += "；超星课表接口未返回上课时间，已仅同步课程"
         if requested_courses and not has_courses:
             message += "；未获取到课程列表"
+        if timeline_error:
+            message += "；时间线服务器请求失败，已使用目标课表或默认时间线"
         if failed_weeks:
             message += f"；{len(failed_weeks)} 个周次获取失败"
         if not is_current:

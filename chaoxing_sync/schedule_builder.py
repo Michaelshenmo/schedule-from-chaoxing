@@ -3,6 +3,8 @@ import json
 import re
 from datetime import date, datetime, timedelta
 
+from .xlsx_timetable import _server_slot_times
+
 
 class ScheduleBuildError(Exception):
     pass
@@ -205,13 +207,40 @@ def _lesson_times(lesson: dict, times):
     return start, finish
 
 
-def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
+def _server_lesson_times(lesson: dict, server_timeline):
+    try:
+        day = int(lesson.get("dayOfWeek") or lesson.get("weekDay") or 0)
+        begin = int(lesson.get("beginNumber") or lesson.get("startSection") or 0)
+        length = int(lesson.get("length") or lesson.get("sectionLength") or 1)
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= day <= 7) or begin < 1 or length < 1:
+        return None
+    end = begin + length - 1
+    slots = server_timeline.get(day) or server_timeline.get(0) or []
+    period_times = _server_slot_times(slots, max(9, end))
+    if end > len(period_times):
+        return None
+    start_slot = period_times[begin - 1]
+    end_slot = period_times[end - 1]
+    if not start_slot or not end_slot:
+        return None
+    start = start_slot[0]
+    finish = end_slot[1]
+    if start >= finish:
+        return None
+    return start, finish
+
+
+def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool, server_timeline=None):
     curriculum = data.get("curriculum") or {}
     lessons = data.get("lessons") or []
     courses = data.get("courses") or []
     if not isinstance(curriculum, dict) or not isinstance(lessons, list) or not isinstance(courses, list):
         raise ScheduleBuildError("课表数据格式异常")
     times = parse_time_config(_extract_time_values(curriculum))
+    server_timeline = server_timeline if isinstance(server_timeline, dict) else {}
+    fill_timeline = bool(sync_timeline or server_timeline)
 
     subjects = {}
     subjects_by_name = {}
@@ -268,7 +297,7 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
         teacher = str(lesson.get("teacherName") or lesson.get("teacher") or "").strip()
         location = str(lesson.get("location") or lesson.get("classroom") or "").strip()
         subject_id = ensure_subject(name, teacher, location) if sync_courses else ""
-        if not sync_timeline:
+        if not fill_timeline:
             continue
         try:
             day = int(lesson.get("dayOfWeek") or lesson.get("weekDay") or 0)
@@ -283,7 +312,7 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
             if number >= 1:
                 week_values.add(number)
         weeks = sorted(week_values)
-        lesson_times = _lesson_times(lesson, times)
+        lesson_times = _server_lesson_times(lesson, server_timeline) if server_timeline else _lesson_times(lesson, times)
         if not (1 <= day <= 7) or not weeks or not lesson_times:
             skipped += 1
             continue
@@ -352,6 +381,9 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool):
         "max_week": int(data.get("max_week") or 0),
         "sync_courses": bool(sync_courses),
         "sync_timeline": bool(sync_timeline),
+        "fill_timeline": bool(fill_timeline),
+        "timeline_source": "server" if server_timeline else "api",
+        "timeline_error": str(data.get("timeline_error") or ""),
         "timetable_error": str(data.get("timetable_error") or ""),
         "course_error": str(data.get("course_error") or ""),
     }

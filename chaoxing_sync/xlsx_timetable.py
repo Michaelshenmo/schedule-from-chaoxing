@@ -195,9 +195,81 @@ def parse_timetable_xlsx(path) -> dict:
     }
 
 
-def _user_timeline_slots(existing_schedule, day, period_count):
+CHINESE_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+NON_CLASS_PATTERN = re.compile(r"早自修|早读|课间|眼保健操|午休|晚自习|放学|升旗|自习")
+
+
+def _chinese_number(text):
+    if not text:
+        return None
+    if text in CHINESE_DIGITS:
+        return CHINESE_DIGITS[text]
+    if text.startswith("十") and len(text) == 2 and text[1] in CHINESE_DIGITS:
+        return 10 + CHINESE_DIGITS[text[1]]
+    if len(text) == 2 and text[0] in CHINESE_DIGITS and text[1] == "十":
+        return CHINESE_DIGITS[text[0]] * 10
+    if len(text) == 3 and text[0] in CHINESE_DIGITS and text[1] == "十" and text[2] in CHINESE_DIGITS:
+        return CHINESE_DIGITS[text[0]] * 10 + CHINESE_DIGITS[text[2]]
+    return None
+
+
+def _slot_period(slot):
+    if not isinstance(slot, dict):
+        return None
+    for key in ("period", "section", "index", "periodIndex", "sectionIndex"):
+        value = slot.get(key)
+        if value is None:
+            continue
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if number >= 1:
+            return number
+    name = str(slot.get("name") or "").strip()
+    match = re.search(r"第\s*(\d+)\s*节", name)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"第\s*([一二三四五六七八九十]+)\s*节", name)
+    if match:
+        return _chinese_number(match.group(1))
+    if name.isdigit():
+        return int(name)
+    return None
+
+
+def _server_slot_times(server_slots, period_count):
+    indexed = {}
+    ordered = []
+    for slot in server_slots or []:
+        if not isinstance(slot, dict):
+            continue
+        start = _normalize_clock(slot.get("start"))
+        end = _normalize_clock(slot.get("end"))
+        if not start or not end or start >= end:
+            continue
+        pair = (start, end)
+        ordered.append((slot, pair))
+        period = _slot_period(slot)
+        if period is not None and 1 <= period <= period_count:
+            indexed.setdefault(period, pair)
+    if indexed:
+        return [indexed.get(index + 1) for index in range(period_count)]
+    filtered = [
+        pair for slot, pair in ordered
+        if not NON_CLASS_PATTERN.search(str(slot.get("name") or ""))
+    ]
+    source = filtered or [pair for _, pair in ordered]
+    return source[:period_count]
+
+
+def _user_timeline_slots(existing_schedule, day, period_count, server_timeline=None):
     slots = []
-    if isinstance(existing_schedule, dict):
+    server_slots = []
+    if isinstance(server_timeline, dict):
+        server_slots = server_timeline.get(day) or server_timeline.get(0) or []
+        slots = [pair for pair in _server_slot_times(server_slots, period_count) if pair]
+    if isinstance(existing_schedule, dict) and not slots:
         candidates = []
         for timeline in existing_schedule.get("days") or []:
             if not isinstance(timeline, dict):
@@ -235,7 +307,7 @@ def _user_timeline_slots(existing_schedule, day, period_count):
     return slots
 
 
-def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: bool, sync_timeline: bool):
+def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: bool, sync_timeline: bool, server_timeline=None):
     blocks = parsed.get("blocks") or []
     period_count = int(parsed.get("period_count") or 9)
     max_week = int(parsed.get("max_week") or 20)
@@ -251,7 +323,8 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
         )
         for timeline in (existing_schedule.get("days") if isinstance(existing_schedule, dict) else []) or []
     )
-    fill_timeline = bool(sync_timeline or has_user_timeline)
+    server_timeline = server_timeline if isinstance(server_timeline, dict) else {}
+    fill_timeline = bool(sync_timeline or has_user_timeline or server_timeline)
     subjects = {}
     subjects_by_key = {}
     timelines = {}
@@ -300,7 +373,7 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
         if not (1 <= day <= 7) or start_period < 1 or end_period < start_period:
             skipped += 1
             continue
-        slots = _user_timeline_slots(existing_schedule, day, max(period_count, end_period))
+        slots = _user_timeline_slots(existing_schedule, day, max(period_count, end_period), server_timeline)
         if end_period > len(slots):
             skipped += 1
             continue
@@ -378,6 +451,7 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
         "sync_courses": bool(sync_courses),
         "sync_timeline": bool(sync_timeline),
         "fill_timeline": bool(fill_timeline),
+        "timeline_source": "server" if server_timeline else ("target" if has_user_timeline else "fallback"),
         "timetable_error": "",
         "course_error": "",
         "source": "xlsx",
