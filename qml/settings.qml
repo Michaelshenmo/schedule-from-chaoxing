@@ -19,6 +19,7 @@ FluentPage {
         timelineSwitch.checked = backend.syncTimeline
         intervalSpin.value = backend.intervalMinutes
         nameField.text = backend.scheduleName
+        timetableFileField.text = backend.timetableFile
         notifyStartupSwitch.checked = backend.notifyStartup
         notifyScheduledSwitch.checked = backend.notifyScheduled
         notifyManualSwitch.checked = backend.notifyManual
@@ -145,12 +146,55 @@ FluentPage {
 
         SettingExpander {
             Layout.fillWidth: true
+            expanded: false
+            icon.name: "ic_fluent_document_table_20_regular"
+            title: "课表导出文件（可选）"
+            description: "超星课表为空时，可选择学校导出的 .xlsx 课表作为数据源"
+
+            SettingItem {
+                title: "文件路径"
+                description: "选择后会优先使用该文件，而不是超星课表接口"
+
+                TextField {
+                    id: timetableFileField
+                    Layout.preferredWidth: 250
+                    readOnly: true
+                    placeholderText: "未选择文件"
+                    selectByMouse: true
+                }
+            }
+
+            SettingItem {
+                title: "选择文件"
+                description: "支持学校系统导出的 .xlsx 课表"
+
+                RowLayout {
+                    spacing: 8
+
+                    Button {
+                        text: "选择文件"
+                        highlighted: true
+                        enabled: backend && !backend.syncing
+                        onClicked: backend.selectTimetableFile()
+                    }
+
+                    Button {
+                        text: "清除"
+                        enabled: backend && backend.timetableFile.length > 0 && !backend.syncing
+                        onClicked: backend.clearTimetableFile()
+                    }
+                }
+            }
+        }
+
+        SettingExpander {
+            Layout.fillWidth: true
             expanded: true
             icon.name: "ic_fluent_arrow_sync_20_regular"
             title: "自动同步"
             description: backend && backend.autoSyncAllowed
                 ? "自动同步已开启"
-                : "自动同步未开启：需要先保存账号，并至少开启同步课程或同步时间线"
+                : "自动同步未开启：需要先保存账号或选择课表文件，并至少开启同步课程或同步时间线"
 
             SettingItem {
                 title: "同步课程"
@@ -224,7 +268,7 @@ FluentPage {
 
                 Button {
                     text: "切换课表"
-                    enabled: backend && backend.credentialsConfigured && !backend.syncing
+                    enabled: backend && !backend.syncing
                     onClicked: backend.switchToTargetSchedule()
                 }
             }
@@ -292,7 +336,7 @@ FluentPage {
             Button {
                 text: backend && backend.syncing ? "同步中…" : "立即同步"
                 enabled: backend
-                    && backend.credentialsConfigured
+                    && (backend.credentialsConfigured || backend.timetableFile.length > 0)
                     && !backend.syncing
                     && !backend.accountChecking
                     && (backend.syncCourses || backend.syncTimeline)

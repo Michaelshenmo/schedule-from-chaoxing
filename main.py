@@ -8,6 +8,7 @@ from enum import IntEnum
 
 from loguru import logger
 from PySide6.QtCore import Property, QThread, QTimer, Signal, Slot
+from PySide6.QtWidgets import QFileDialog
 
 from ClassWidgets.SDK import CW2Plugin, ConfigBaseModel, PluginAPI
 
@@ -23,10 +24,12 @@ except ImportError:
 from chaoxing_sync.client import ChaoxingClient
 from chaoxing_sync.credentials import protect_account, unprotect_account
 from chaoxing_sync.schedule_builder import build_schedule
+from chaoxing_sync.xlsx_timetable import build_xlsx_schedule, parse_timetable_xlsx
 
 
 ACTIVE_THREADS = set()
 DEFAULT_SCHEDULE_NAME = "超星学习通"
+AUTO_TIMELINE_PREFIXES = ("chaoxing-timeline-", "cxd-")
 
 
 class PluginConfig(ConfigBaseModel):
@@ -35,6 +38,7 @@ class PluginConfig(ConfigBaseModel):
     sync_timeline: bool = True
     interval_minutes: int = 20
     schedule_name: str = DEFAULT_SCHEDULE_NAME
+    timetable_file: str = ""
     last_sync_at: str = ""
     notify_startup: bool = True
     notify_scheduled: bool = False
@@ -76,17 +80,46 @@ class SyncThread(QThread):
     succeeded = Signal(object, str)
     failed = Signal(str, str)
 
-    def __init__(self, encrypted_account: str, sync_courses: bool, sync_timeline: bool, reason: str):
+    def __init__(
+        self,
+        encrypted_account: str,
+        sync_courses: bool,
+        sync_timeline: bool,
+        reason: str,
+        timetable_file: str = "",
+        existing_schedule=None,
+    ):
         super().__init__()
         self._encrypted_account = encrypted_account
         self._sync_courses = sync_courses
         self._sync_timeline = sync_timeline
         self._reason = reason
+        self._timetable_file = timetable_file
+        self._existing_schedule = existing_schedule or {}
 
     def run(self):
         username = ""
         password = ""
         try:
+            if self._timetable_file:
+                parsed = parse_timetable_xlsx(self._timetable_file)
+                schedule, info = build_xlsx_schedule(
+                    parsed,
+                    self._existing_schedule,
+                    self._sync_courses,
+                    self._sync_timeline,
+                )
+                info["synced_at"] = datetime.now().isoformat(timespec="seconds")
+                logger.info(
+                    "Parsed timetable file {} ({} blocks, {} subjects, {} entries)".format(
+                        self._timetable_file,
+                        info.get("lesson_count", 0),
+                        info.get("course_count", 0),
+                        info.get("entry_count", 0),
+                    )
+                )
+                self.succeeded.emit((schedule, info), self._reason)
+                return
             username, password = unprotect_account(self._encrypted_account)
             client = ChaoxingClient()
             client.login(username, password)
@@ -193,7 +226,8 @@ class Plugin(CW2Plugin):
 
     @Property(bool, notify=configChanged)
     def autoSyncAllowed(self) -> bool:
-        return self.credentialsConfigured and (self.config.sync_courses or self.config.sync_timeline)
+        source_ready = self.credentialsConfigured or bool(str(self.config.timetable_file or "").strip())
+        return source_ready and (self.config.sync_courses or self.config.sync_timeline)
 
     @Property(int, notify=configChanged)
     def intervalMinutes(self) -> int:
@@ -202,6 +236,10 @@ class Plugin(CW2Plugin):
     @Property(str, notify=configChanged)
     def scheduleName(self) -> str:
         return str(self.config.schedule_name)
+
+    @Property(str, notify=configChanged)
+    def timetableFile(self) -> str:
+        return str(self.config.timetable_file or "")
 
     @Property(bool, notify=syncStateChanged)
     def syncing(self) -> bool:
@@ -343,6 +381,31 @@ class Plugin(CW2Plugin):
         self._save_config()
         self.configChanged.emit()
 
+    @Slot(result=str)
+    def selectTimetableFile(self) -> str:
+        path, _ = QFileDialog.getOpenFileName(
+            None,
+            "选择课表导出文件",
+            "",
+            "Excel 工作簿 (*.xlsx)",
+        )
+        if not path:
+            return ""
+        self.config.timetable_file = path
+        self._save_config()
+        self.configChanged.emit()
+        self._apply_config()
+        self._set_status(f"已选择课表文件：{Path(path).name}")
+        return path
+
+    @Slot()
+    def clearTimetableFile(self):
+        self.config.timetable_file = ""
+        self._save_config()
+        self.configChanged.emit()
+        self._apply_config()
+        self._set_status("已清除课表文件，将使用超星接口同步")
+
     @Slot()
     def triggerSync(self):
         self._start_sync("manual")
@@ -408,10 +471,11 @@ class Plugin(CW2Plugin):
         manual = reason == "manual"
         if self._closing or self._syncing or self._account_checking:
             return
-        if not self.credentialsConfigured:
-            self._set_status("请先设置超星学习通账号")
+        timetable_file = str(self.config.timetable_file or "").strip()
+        if not timetable_file and not self.credentialsConfigured:
+            self._set_status("请先设置超星学习通账号或选择课表导出文件")
             if manual:
-                self._notify("manual", NotificationLevel.WARNING, "超星学习通", "请先设置账号")
+                self._notify("manual", NotificationLevel.WARNING, "超星学习通", "请先设置账号或选择课表文件")
             return
         if not (self.config.sync_courses or self.config.sync_timeline):
             self._set_status("同步课程与时间线均已关闭，自动同步已停止")
@@ -420,12 +484,15 @@ class Plugin(CW2Plugin):
             return
         self._syncing = True
         self.syncStateChanged.emit()
-        self._set_status("正在从超星学习通同步课表…")
+        self._set_status("正在同步课表…")
+        existing_schedule = self._read_existing_schedule() if timetable_file else None
         thread = SyncThread(
             self.config.encrypted_account,
             bool(self.config.sync_courses),
             bool(self.config.sync_timeline),
             reason,
+            timetable_file,
+            existing_schedule,
         )
         thread.succeeded.connect(self._on_sync_success)
         thread.failed.connect(self._on_sync_failed)
@@ -492,7 +559,11 @@ class Plugin(CW2Plugin):
             or (requested_timeline and not has_timeline)
         )
         try:
-            name, path, is_current = self._write_schedule(schedule)
+            name, path, is_current = self._write_schedule(
+                schedule,
+                requested_courses,
+                requested_timeline,
+            )
         except Exception as error:
             self._on_sync_failed(f"保存课表失败：{error}", reason)
             return
@@ -541,7 +612,132 @@ class Plugin(CW2Plugin):
         }.get(reason, "超星学习通同步失败")
         self._notify(reason, NotificationLevel.WARNING, title, message)
 
-    def _write_schedule(self, schedule: dict):
+    def _read_existing_schedule(self):
+        name = _sanitize_schedule_name(self.config.schedule_name)
+        schedules = self.api.schedulemanagement.list()
+        entry = next((item for item in schedules if item.get("name") == name), None)
+        if entry is None:
+            return None
+        path = Path(entry["path"])
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        meta = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+        if not str(meta.get("id") or "").startswith("chaoxing-"):
+            return None
+        return data
+
+    @staticmethod
+    def _is_auto_timeline(timeline):
+        return str((timeline or {}).get("id") or "").startswith(AUTO_TIMELINE_PREFIXES)
+
+    def _merge_schedule(self, existing, generated, sync_courses, sync_timeline):
+        existing = existing if isinstance(existing, dict) else {}
+        generated = generated if isinstance(generated, dict) else {}
+        existing_days = [day for day in existing.get("days") or [] if isinstance(day, dict)]
+        existing_subjects = [subject for subject in existing.get("subjects") or [] if isinstance(subject, dict)]
+        existing_overrides = [override for override in existing.get("overrides") or [] if isinstance(override, dict)]
+        generated_days = [day for day in generated.get("days") or [] if isinstance(day, dict)]
+        generated_subjects = [subject for subject in generated.get("subjects") or [] if isinstance(subject, dict)]
+        has_user_timeline = any(not self._is_auto_timeline(day) for day in existing_days)
+        existing_meta = existing.get("meta") if isinstance(existing.get("meta"), dict) else None
+        generated_meta = generated.get("meta") if isinstance(generated.get("meta"), dict) else None
+        if existing_meta and has_user_timeline:
+            meta = dict(existing_meta)
+        else:
+            meta = dict(generated_meta or existing_meta or {})
+            if existing_meta and str(existing_meta.get("id") or "").startswith("chaoxing-"):
+                meta["id"] = str(existing_meta.get("id"))
+            if not str(meta.get("id") or "").startswith("chaoxing-"):
+                meta["id"] = "chaoxing-schedule"
+        meta.setdefault("version", 1)
+        meta.setdefault("maxWeekCycle", 2)
+        meta.setdefault("startDate", "2026-09-01")
+
+        remap = {}
+        if sync_courses:
+            referenced = set()
+            for day in existing_days:
+                if self._is_auto_timeline(day):
+                    continue
+                for entry in day.get("entries") or []:
+                    if isinstance(entry, dict) and entry.get("subjectId"):
+                        referenced.add(str(entry["subjectId"]))
+            for override in existing_overrides:
+                if override.get("subjectId"):
+                    referenced.add(str(override["subjectId"]))
+            subjects = []
+            by_key = {}
+            by_name = {}
+            for subject in existing_subjects:
+                subject_id = str(subject.get("id") or "")
+                if subject_id.startswith("cx-") and subject_id not in referenced:
+                    continue
+                item = dict(subject)
+                subjects.append(item)
+                name = str(item.get("name") or "").strip()
+                teacher = str(item.get("teacher") or "").strip()
+                by_key[(name, teacher)] = item
+                by_name.setdefault(name, item)
+            for subject in generated_subjects:
+                name = str(subject.get("name") or "").strip()
+                if not name:
+                    continue
+                teacher = str(subject.get("teacher") or "").strip()
+                key = (name, teacher)
+                match = by_key.get(key)
+                if match is None:
+                    same_name = by_name.get(name)
+                    if same_name is not None and (not teacher or not str(same_name.get("teacher") or "").strip()):
+                        match = same_name
+                if match is not None:
+                    if teacher and not match.get("teacher"):
+                        match["teacher"] = teacher
+                    if subject.get("location") and not match.get("location"):
+                        match["location"] = subject["location"]
+                    remap[str(subject.get("id") or "")] = str(match.get("id") or "")
+                else:
+                    item = dict(subject)
+                    subjects.append(item)
+                    by_key[key] = item
+                    by_name.setdefault(name, item)
+                    remap[str(subject.get("id") or "")] = str(item.get("id") or "")
+        else:
+            subjects = [dict(subject) for subject in existing_subjects]
+
+        new_days = []
+        for day in generated_days:
+            item = dict(day)
+            entries = []
+            for entry in item.get("entries") or []:
+                if not isinstance(entry, dict):
+                    continue
+                entry = dict(entry)
+                subject_id = entry.get("subjectId")
+                if subject_id is not None:
+                    entry["subjectId"] = remap.get(str(subject_id), subject_id)
+                entries.append(entry)
+            item["entries"] = entries
+            new_days.append(item)
+
+        if sync_timeline:
+            days = [dict(day) for day in existing_days if not self._is_auto_timeline(day)] + new_days
+        else:
+            days = [dict(day) for day in existing_days]
+
+        return {
+            "meta": meta,
+            "subjects": subjects,
+            "days": days,
+            "overrides": [dict(override) for override in existing_overrides],
+        }
+
+    def _write_schedule(self, schedule, sync_courses, sync_timeline):
         name = _sanitize_schedule_name(self.config.schedule_name)
         if name != self.config.schedule_name:
             self.config.schedule_name = name
@@ -560,19 +756,22 @@ class Plugin(CW2Plugin):
         if entry is None:
             raise RuntimeError("无法创建目标课表")
         path = Path(entry["path"])
+        existing = None
         if path.exists() and not created:
             try:
                 existing = json.loads(path.read_text(encoding="utf-8"))
                 marker = str((existing.get("meta") or {}).get("id") or "")
             except Exception:
                 marker = ""
+                existing = None
             if not marker.startswith("chaoxing-"):
                 raise RuntimeError("目标课表已存在且不是本插件创建的，请更换课表名称")
+        merged = self._merge_schedule(existing, schedule, sync_courses, sync_timeline)
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.parent / f".{path.name}.{os.getpid()}.tmp"
         try:
             with open(temp_path, "w", encoding="utf-8") as file:
-                json.dump(schedule, file, ensure_ascii=False, indent=4)
+                json.dump(merged, file, ensure_ascii=False, indent=4)
             os.replace(temp_path, path)
         finally:
             if temp_path.exists():
