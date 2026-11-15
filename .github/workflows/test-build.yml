@@ -30,7 +30,7 @@ jobs:
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "class-widgets-sdk>=0.7.0"
+          python -m pip install "class-widgets-sdk>=0.7.0" packaging
 
       - name: Prepare test version
         id: version
@@ -38,13 +38,15 @@ jobs:
           python - <<'PY'
           import json
           import os
+          from packaging.version import Version
 
           path = "cwplugin.json"
           with open(path, encoding="utf-8") as file:
               manifest = json.load(file)
           short_sha = os.environ["GITHUB_SHA"][:7]
-          base_version = manifest["version"].split("-test.", 1)[0]
-          manifest["version"] = f"{base_version}-test.{short_sha}"
+          base_version = manifest["version"].split("+", 1)[0]
+          manifest["version"] = f"{base_version}+test.{short_sha}"
+          Version(manifest["version"])
           with open(path, "w", encoding="utf-8") as file:
               json.dump(manifest, file, ensure_ascii=False, indent=2)
               file.write("\n")
@@ -63,6 +65,42 @@ jobs:
           cw-plugin-pack . -o "dist/${PLUGIN_ID}-${SHORT_SHA}.cwplugin"
           cw-plugin-pack . --format zip -o "dist/${PLUGIN_ID}-${SHORT_SHA}.zip"
           ls -lh dist
+
+      - name: Verify test package
+        run: |
+          python - <<'PY'
+          import json
+          import zipfile
+          from pathlib import Path
+          from packaging.version import Version
+
+          required = ("id", "name", "version", "api_version", "entry", "author")
+          packages = sorted(
+              list(Path("dist").glob("*.cwplugin"))
+              + list(Path("dist").glob("*.zip"))
+          )
+          if not packages:
+              raise SystemExit("No .cwplugin package was produced")
+          for package in packages:
+              with zipfile.ZipFile(package) as archive:
+                  manifests = [
+                      name for name in archive.namelist()
+                      if Path(name).name == "cwplugin.json"
+                  ]
+                  if len(manifests) != 1:
+                      raise SystemExit(f"{package}: expected exactly one cwplugin.json")
+                  manifest = json.loads(archive.read(manifests[0]).decode("utf-8"))
+                  if not all(
+                      isinstance(manifest.get(field), str) and manifest[field].strip()
+                      for field in required
+                  ):
+                      raise SystemExit(f"{package}: missing required manifest fields")
+                  Version(manifest["version"])
+                  entry = manifest["entry"].replace("\\", "/")
+                  if entry not in archive.namelist():
+                      raise SystemExit(f"{package}: entry file is missing: {entry}")
+                  print(f"{package.name}: {manifest['id']} {manifest['version']}")
+          PY
 
       - name: Write job summary
         run: |
