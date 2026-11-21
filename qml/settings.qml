@@ -67,33 +67,163 @@ FluentPage {
         Layout.fillWidth: true
         spacing: 12
 
-        SettingCard {
+        Frame {
+            id: syncBanner
             Layout.fillWidth: true
-            icon.name: "ic_fluent_arrow_sync_checkmark_20_regular"
-            title: "学习通课表同步"
-            description: backend ? backend.statusText : "插件尚未就绪"
+            hoverable: false
+            leftPadding: 20
+            rightPadding: 20
+            topPadding: 16
+            bottomPadding: 16
 
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 12
+            readonly property bool syncing: backend ? backend.syncing : false
+            readonly property bool failed: backend ? String(backend.statusText).indexOf("同步失败") === 0 : false
+            readonly property bool synced: backend ? backend.lastSyncText !== "尚未同步" : false
+            readonly property string headline: {
+                if (!backend) {
+                    return "插件尚未就绪"
+                }
+                if (backend.syncing) {
+                    return "正在同步课表…"
+                }
+                if (backend.accountChecking) {
+                    return "正在验证账号…"
+                }
+                if (syncBanner.failed) {
+                    return "同步失败"
+                }
+                if (syncBanner.synced) {
+                    return "课表已更新"
+                }
+                return "等待同步"
+            }
+            readonly property string statusLine: backend ? backend.statusText : "请稍候…"
 
-                Button {
-                    text: backend && backend.syncing ? "同步中…" : "立即同步"
-                    enabled: backend
-                        && (backend.credentialsConfigured || backend.timetableFile.length > 0 || backend.timetableUrl.length > 0)
-                        && !backend.syncing
-                        && !backend.accountChecking
-                        && (backend.syncCourses || backend.syncTimeline)
-                    highlighted: true
-                    onClicked: backend.triggerSync()
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 10
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 14
+
+                    Icon {
+                        id: syncBannerIcon
+                        Layout.alignment: Qt.AlignVCenter
+                        size: 30
+                        name: syncBanner.syncing
+                            ? "ic_fluent_arrow_sync_20_filled"
+                            : backend && backend.accountChecking
+                                ? "ic_fluent_person_20_filled"
+                                : syncBanner.failed
+                                    ? "ic_fluent_error_circle_20_filled"
+                                    : syncBanner.synced
+                                        ? "ic_fluent_checkmark_circle_20_filled"
+                                        : "ic_fluent_info_20_filled"
+                        color: syncBanner.syncing
+                            ? Theme.currentTheme.colors.primaryColor
+                            : syncBanner.failed
+                                ? Theme.currentTheme.colors.systemCriticalColor
+                                : syncBanner.synced
+                                    ? Theme.currentTheme.colors.systemSuccessColor
+                                    : Theme.currentTheme.colors.textSecondaryColor
+
+                        RotationAnimation on rotation {
+                            running: syncBanner.syncing
+                            from: 0
+                            to: 360
+                            duration: 1200
+                            loops: Animation.Infinite
+                            onRunningChanged: {
+                                if (!running) {
+                                    syncBannerIcon.rotation = 0
+                                }
+                            }
+                        }
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 120
+                        spacing: 2
+
+                        Text {
+                            Layout.fillWidth: true
+                            typography: Typography.BodyLarge
+                            text: syncBanner.headline
+                            elide: Text.ElideRight
+                            wrapMode: Text.NoWrap
+                            maximumLineCount: 1
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: statusText.implicitHeight
+                            visible: !syncBanner.syncing
+
+                            Text {
+                                id: statusText
+                                anchors.fill: parent
+                                typography: Typography.Caption
+                                color: syncBanner.failed
+                                    ? Theme.currentTheme.colors.systemCriticalColor
+                                    : Theme.currentTheme.colors.textSecondaryColor
+                                text: syncBanner.statusLine
+                                elide: Text.ElideRight
+                                wrapMode: Text.NoWrap
+                                maximumLineCount: 1
+                                verticalAlignment: Text.AlignVCenter
+                            }
+
+                            MouseArea {
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                acceptedButtons: Qt.NoButton
+
+                                ToolTip {
+                                    visible: parent.containsMouse && statusText.truncated
+                                    text: syncBanner.statusLine
+                                }
+                            }
+                        }
+                    }
+
+                    ColumnLayout {
+                        Layout.alignment: Qt.AlignVCenter
+                        spacing: 6
+
+                        Text {
+                            Layout.alignment: Qt.AlignRight
+                            Layout.maximumWidth: 200
+                            typography: Typography.Caption
+                            color: Theme.currentTheme.colors.textSecondaryColor
+                            text: backend ? backend.lastSyncText : "尚未同步"
+                            elide: Text.ElideRight
+                            wrapMode: Text.NoWrap
+                            maximumLineCount: 1
+                            horizontalAlignment: Text.AlignRight
+                        }
+
+                        Button {
+                            Layout.alignment: Qt.AlignRight
+                            Layout.minimumWidth: 110
+                            text: syncBanner.syncing ? "同步中…" : "立即同步"
+                            icon.name: "ic_fluent_arrow_sync_20_regular"
+                            highlighted: true
+                            enabled: backend
+                                && (backend.credentialsConfigured || backend.timetableFile.length > 0 || backend.timetableUrl.length > 0)
+                                && !backend.syncing
+                                && !backend.accountChecking
+                                && (backend.syncCourses || backend.syncTimeline)
+                            onClicked: backend.triggerSync()
+                        }
+                    }
                 }
 
-                Text {
+                ProgressBar {
                     Layout.fillWidth: true
-                    typography: Typography.Caption
-                    color: Theme.currentTheme.colors.textSecondaryColor
-                    wrapMode: Text.Wrap
-                    text: backend ? backend.lastSyncText : "尚未同步"
+                    visible: syncBanner.syncing
+                    indeterminate: true
                 }
             }
         }
