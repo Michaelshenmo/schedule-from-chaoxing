@@ -2,7 +2,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from .breaks import fill_breaks
+from .breaks import fill_breaks, merge_day_timelines
 from .filters import filter_timeline_slots, is_excluded, split_names
 from .weeks import parse_weeks
 
@@ -494,6 +494,16 @@ def build_xlsx_schedule(
     if meta_id.startswith("chaoxing-") and start_date in ("", "2026-11-09"):
         start_date = "2026-09-01"
     max_cycle = int(meta.get("maxWeekCycle") or 2)
+    day_list = fill_breaks(
+        sorted(
+            timelines.values(),
+            key=lambda item: (item["dayOfWeek"][0], item["entries"][0]["startTime"] if item["entries"] else ""),
+        ),
+        max_week,
+        break_limit_minutes,
+    )
+    day_list = merge_day_timelines(day_list, max_week, "chaoxing-timeline")
+    entry_count = sum(len(timeline.get("entries") or []) for timeline in day_list)
     schedule = {
         "meta": {
             "id": meta_id if meta_id.startswith("chaoxing-") else "chaoxing-excel",
@@ -502,16 +512,13 @@ def build_xlsx_schedule(
             "startDate": start_date,
         },
         "subjects": sorted(subjects.values(), key=lambda item: item["name"]),
-        "days": fill_breaks(sorted(
-            timelines.values(),
-            key=lambda item: (item["dayOfWeek"][0], item["entries"][0]["startTime"] if item["entries"] else ""),
-        ), max_week, break_limit_minutes),
+        "days": day_list,
         "overrides": [],
     }
     info = {
         "course_count": len(subjects),
         "entry_count": entry_count,
-        "timeline_count": len(timelines),
+        "timeline_count": len(day_list),
         "skipped_count": skipped,
         "lesson_count": len(blocks),
         "course_list_count": len(blocks),

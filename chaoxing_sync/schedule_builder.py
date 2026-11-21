@@ -3,7 +3,7 @@ import json
 import re
 from datetime import date, datetime, timedelta
 
-from .breaks import fill_breaks
+from .breaks import fill_breaks, merge_day_timelines
 from .filters import filter_timeline_slots, is_excluded, split_names
 from .xlsx_timetable import _server_activity_slots, _server_slot_times, _slot_period
 
@@ -428,7 +428,10 @@ def build_schedule(
         timelines.values(),
         key=lambda item: (item["dayOfWeek"][0], item["entries"][0]["startTime"] if item["entries"] else ""),
     )
-    day_list = fill_breaks(day_list, int(data.get("max_week") or 0), break_limit_minutes)
+    max_week = int(data.get("max_week") or 0)
+    day_list = fill_breaks(day_list, max_week, break_limit_minutes)
+    day_list = merge_day_timelines(day_list, max_week, "cxd")
+    entry_count = sum(len(timeline.get("entries") or []) for timeline in day_list)
     uuid = str(curriculum.get("uuid") or "").strip()
     meta_id = f"chaoxing-{uuid}" if uuid else "chaoxing-schedule"
     schedule = {
@@ -451,7 +454,7 @@ def build_schedule(
         "course_list_count": len(courses),
         "time_slot_count": len([slot for slot in times if slot]),
         "failed_weeks": list(data.get("failed_weeks") or []),
-        "max_week": int(data.get("max_week") or 0),
+        "max_week": max_week,
         "sync_courses": bool(sync_courses),
         "sync_timeline": bool(sync_timeline),
         "fill_timeline": bool(fill_timeline),
