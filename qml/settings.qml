@@ -5,7 +5,7 @@ import RinUI
 
 FluentPage {
     id: page
-    title: "超星学习通"
+    title: "学习通课表同步"
     property string pluginId: "com.msyark.chaoxingsync"
     property var backend: PluginBackendBridge.get_backend(pluginId)
     property bool ready: false
@@ -18,11 +18,14 @@ FluentPage {
         coursesSwitch.checked = backend.syncCourses
         timelineSwitch.checked = backend.syncTimeline
         intervalSpin.value = backend.intervalMinutes
+        breakLimitSpin.value = backend.breakLimitMinutes
         nameField.text = backend.scheduleName
         timetableFileField.text = backend.timetableFile
         timetableUrlField.text = backend.timetableUrl
         timelineServerUrlField.text = backend.timelineServerUrl
         deviceSnField.text = backend.deviceSn
+        excludeCoursesField.text = backend.excludeCourses
+        excludeTimelineField.text = backend.excludeTimeline
         notifyStartupSwitch.checked = backend.notifyStartup
         notifyScheduledSwitch.checked = backend.notifyScheduled
         notifyManualSwitch.checked = backend.notifyManual
@@ -64,9 +67,40 @@ FluentPage {
         Layout.fillWidth: true
         spacing: 12
 
+        SettingCard {
+            Layout.fillWidth: true
+            icon.name: "ic_fluent_arrow_sync_checkmark_20_regular"
+            title: "学习通课表同步"
+            description: backend ? backend.statusText : "插件尚未就绪"
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                Button {
+                    text: backend && backend.syncing ? "同步中…" : "立即同步"
+                    enabled: backend
+                        && (backend.credentialsConfigured || backend.timetableFile.length > 0 || backend.timetableUrl.length > 0)
+                        && !backend.syncing
+                        && !backend.accountChecking
+                        && (backend.syncCourses || backend.syncTimeline)
+                    highlighted: true
+                    onClicked: backend.triggerSync()
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    typography: Typography.Caption
+                    color: Theme.currentTheme.colors.textSecondaryColor
+                    wrapMode: Text.Wrap
+                    text: backend ? backend.lastSyncText : "尚未同步"
+                }
+            }
+        }
+
         SettingExpander {
             Layout.fillWidth: true
-            expanded: true
+            expanded: false
             icon.name: "ic_fluent_person_20_regular"
             title: "账号"
             description: backend && backend.credentialsConfigured
@@ -149,7 +183,7 @@ FluentPage {
 
         SettingExpander {
             Layout.fillWidth: true
-            expanded: true
+            expanded: false
             icon.name: "ic_fluent_document_table_20_regular"
             title: "课表导出文件（可选）"
             description: "可选择本地 .xlsx 课表，或填写学校提供的课表文件下载地址"
@@ -209,14 +243,14 @@ FluentPage {
 
         SettingExpander {
             Layout.fillWidth: true
-            expanded: true
+            expanded: false
             icon.name: "ic_fluent_clock_20_regular"
             title: "时间线服务器"
             description: "从自建服务器拉取节次时间；课程仍来自课表文件或超星"
 
             SettingItem {
                 title: "服务器地址"
-                description: "填写 admin-system 服务器地址，插件会自动尝试时间线接口"
+                description: "填写晋元学生平板终端集控系统服务器地址，插件会自动尝试时间线接口"
 
                 TextField {
                     id: timelineServerUrlField
@@ -233,7 +267,7 @@ FluentPage {
 
             SettingItem {
                 title: "设备 SN"
-                description: "用于向 admin-system 认证设备；由学校提供"
+                description: "用于向晋元学生平板终端集控系统认证设备；由学校提供"
 
                 TextField {
                     id: deviceSnField
@@ -251,12 +285,14 @@ FluentPage {
 
         SettingExpander {
             Layout.fillWidth: true
-            expanded: true
+            expanded: false
             icon.name: "ic_fluent_arrow_sync_20_regular"
             title: "自动同步"
-            description: backend && backend.autoSyncAllowed
-                ? "自动同步已开启"
-                : "自动同步未开启：需要先保存账号、选择课表文件或填写下载地址，并至少开启同步课程或同步时间线"
+            description: backend && backend.autoSyncAllowed && backend.intervalMinutes >= 1
+                ? "定时自动同步已开启"
+                : backend && backend.autoSyncAllowed
+                    ? "定时同步已关闭，仅保留启动同步和手动同步"
+                    : "自动同步未开启：需要先保存账号、选择课表文件或填写下载地址，并至少开启同步课程或同步时间线"
 
             SettingItem {
                 title: "同步课程"
@@ -275,7 +311,7 @@ FluentPage {
 
             SettingItem {
                 title: "同步时间线"
-                description: "开启时补全时间线；关闭时按目标课表或服务器时间线填充课程"
+                description: "开启时获取并写入时间线；关闭时不获取、不写入或替换时间线，仅同步课程"
 
                 Switch {
                     id: timelineSwitch
@@ -290,17 +326,35 @@ FluentPage {
 
             SettingItem {
                 title: "同步间隔"
-                description: "默认 20 分钟，范围 1–1440 分钟"
+                description: "默认 20 分钟；-1 表示仅启动和手动同步，其余范围 1–1440 分钟"
 
                 SpinBox {
                     id: intervalSpin
-                    from: 1
+                    from: -1
                     to: 1440
                     editable: true
                     Layout.preferredWidth: 160
                     onValueChanged: {
                         if (page.ready && backend) {
                             backend.setIntervalMinutes(value)
+                        }
+                    }
+                }
+            }
+
+            SettingItem {
+                title: "课间上限"
+                description: "仅填充不超过该时长的空档；-1 不限制，0 不填充课间"
+
+                SpinBox {
+                    id: breakLimitSpin
+                    from: -1
+                    to: 1440
+                    editable: true
+                    Layout.preferredWidth: 160
+                    onValueChanged: {
+                        if (page.ready && backend) {
+                            backend.setBreakLimitMinutes(value)
                         }
                     }
                 }
@@ -332,6 +386,48 @@ FluentPage {
                     text: "切换课表"
                     enabled: backend && !backend.syncing
                     onClicked: backend.switchToTargetSchedule()
+                }
+            }
+        }
+
+        SettingExpander {
+            Layout.fillWidth: true
+            expanded: false
+            icon.name: "ic_fluent_filter_20_regular"
+            title: "排除项"
+            description: "按名称去除不需要的课程或时间线节次；多个名称用逗号分隔"
+
+            SettingItem {
+                title: "排除课程"
+                description: "课程名称包含这些关键词时不同步"
+
+                TextField {
+                    id: excludeCoursesField
+                    Layout.preferredWidth: 250
+                    placeholderText: "例如：班会, 自习"
+                    selectByMouse: true
+                    onEditingFinished: {
+                        if (backend) {
+                            backend.setExcludeCourses(text)
+                        }
+                    }
+                }
+            }
+
+            SettingItem {
+                title: "排除时间线"
+                description: "节次名称包含这些关键词时不写入时间线"
+
+                TextField {
+                    id: excludeTimelineField
+                    Layout.preferredWidth: 250
+                    placeholderText: "例如：午休, 晚自习"
+                    selectByMouse: true
+                    onEditingFinished: {
+                        if (backend) {
+                            backend.setExcludeTimeline(text)
+                        }
+                    }
                 }
             }
         }
@@ -389,36 +485,31 @@ FluentPage {
             }
         }
 
-        SettingCard {
-            Layout.fillWidth: true
-            icon.name: "ic_fluent_arrow_sync_checkmark_20_regular"
-            title: "立即同步"
-            description: "手动拉取一次课表；同步完成后可在课表设置中切换到目标课表"
 
-            Button {
-                text: backend && backend.syncing ? "同步中…" : "立即同步"
-                enabled: backend
-                    && (backend.credentialsConfigured || backend.timetableFile.length > 0 || backend.timetableUrl.length > 0)
-                    && !backend.syncing
-                    && !backend.accountChecking
-                    && (backend.syncCourses || backend.syncTimeline)
-                highlighted: true
-                onClicked: backend.triggerSync()
+        SettingExpander {
+            Layout.fillWidth: true
+            expanded: false
+            icon.name: "ic_fluent_text_bullet_list_square_20_regular"
+            title: "同步详情"
+            description: "查看最近一次同步的请求、返回与构建信息"
+
+            SettingItem {
+                Layout.fillWidth: true
+
+                ScrollView {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 190
+                    clip: true
+
+                    TextArea {
+                        readOnly: true
+                        selectByMouse: true
+                        wrapMode: TextArea.Wrap
+                        text: backend ? backend.statusDetails : ""
+                        color: Theme.currentTheme.colors.textSecondaryColor
+                    }
+                }
             }
-        }
-
-        SettingCard {
-            Layout.fillWidth: true
-            icon.name: "ic_fluent_info_20_regular"
-            title: "同步状态"
-            description: backend ? backend.statusText : "插件尚未就绪"
-        }
-
-        SettingCard {
-            Layout.fillWidth: true
-            icon.name: "ic_fluent_clock_20_regular"
-            title: "上次同步"
-            description: backend ? backend.lastSyncText : "尚未同步"
         }
 
         Text {

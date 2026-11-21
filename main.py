@@ -45,6 +45,9 @@ class PluginConfig(ConfigBaseModel):
     timetable_url: str = ""
     timeline_server_url: str = ""
     device_sn: str = ""
+    exclude_courses: str = ""
+    exclude_timeline: str = ""
+    break_limit_minutes: int = 45
     last_sync_at: str = ""
     notify_startup: bool = True
     notify_scheduled: bool = False
@@ -96,6 +99,9 @@ class SyncThread(QThread):
         timetable_url: str = "",
         timeline_server_url: str = "",
         device_sn: str = "",
+        exclude_courses: str = "",
+        exclude_timeline: str = "",
+        break_limit_minutes: int = 45,
         existing_schedule=None,
     ):
         super().__init__()
@@ -107,7 +113,18 @@ class SyncThread(QThread):
         self._timetable_url = timetable_url
         self._timeline_server_url = timeline_server_url
         self._device_sn = device_sn
+        self._exclude_courses = exclude_courses
+        self._exclude_timeline = exclude_timeline
+        self._break_limit_minutes = break_limit_minutes
         self._existing_schedule = existing_schedule or {}
+        self.details = []
+
+    def _detail(self, message: str):
+        self.details.append(str(message))
+
+    @property
+    def details_text(self) -> str:
+        return "\n".join(self.details)
 
     def _download_timetable(self, url: str) -> Path:
         session = requests.Session()
@@ -115,7 +132,7 @@ class SyncThread(QThread):
         if self._encrypted_account:
             try:
                 username, password = unprotect_account(self._encrypted_account)
-                client = ChaoxingClient()
+                client = ChaoxingClient(detail=self._detail)
                 client.login(username, password)
                 session = client.session
             except Exception:
@@ -137,34 +154,65 @@ class SyncThread(QThread):
         temp_file = None
         admin_timeline = {}
         timeline_error = ""
+        admin_configured = bool(self._timeline_server_url)
+        self._detail(f"触发方式：{self._reason}")
+        if self._exclude_courses.strip():
+            self._detail(f"排除课程：{self._exclude_courses.strip()}")
+        if self._exclude_timeline.strip():
+            self._detail(f"排除时间线：{self._exclude_timeline.strip()}")
+        self._detail(f"课间上限：{'不限制' if self._break_limit_minutes < 0 else str(self._break_limit_minutes) + ' 分钟'}")
         try:
-            if self._timeline_server_url:
+            if not self._sync_timeline:
+                self._detail("同步时间线已关闭，跳过时间线获取")
+            elif admin_configured:
+                self._detail(f"时间线服务器：{self._timeline_server_url}")
+                if self._device_sn:
+                    sn = self._device_sn
+                    self._detail(f"设备 SN：{sn[:2]}***{sn[-2:] if len(sn) > 4 else ''}")
                 try:
                     if self._device_sn:
                         admin_timeline = fetch_admin_timeline(
                             self._timeline_server_url,
                             self._device_sn,
+                            self._detail,
                         )
                     else:
-                        admin_timeline = fetch_timeline(self._timeline_server_url)
+                        admin_timeline = fetch_timeline(self._timeline_server_url, detail=self._detail)
+                    self._detail(f"时间线获取成功：{sum(len(v) for v in admin_timeline.values())} 个节次")
                 except Exception as error:
                     timeline_error = str(error)
+                    self._detail(f"时间线获取失败：{error}")
                     logger.warning(f"Timeline server request failed: {error}")
+            else:
+                self._detail("未设置时间线服务器")
+            if self._sync_timeline and admin_configured and not admin_timeline and not timeline_error:
+                timeline_error = "时间线服务器未返回可用节次"
+                self._detail(timeline_error)
             source_file = self._timetable_file
             if not source_file and self._timetable_url:
                 temp_file = self._download_timetable(self._timetable_url)
                 source_file = str(temp_file)
             if source_file:
                 parsed = parse_timetable_xlsx(source_file)
+                admin_failed = self._sync_timeline and admin_configured and not admin_timeline
                 schedule, info = build_xlsx_schedule(
                     parsed,
                     self._existing_schedule,
                     self._sync_courses,
                     self._sync_timeline,
                     admin_timeline,
+                    allow_course_timeline=not admin_failed,
+                    exclude_courses=self._exclude_courses,
+                    exclude_timeline=self._exclude_timeline,
+                    break_limit_minutes=self._break_limit_minutes,
                 )
                 info["synced_at"] = datetime.now().isoformat(timespec="seconds")
                 info["timeline_error"] = timeline_error
+                info["admin_failed"] = admin_failed
+                self._detail(f"课表文件：{source_file}")
+                self._detail(f"构建结果：课程 {info.get('course_count', 0)}，时间段 {info.get('entry_count', 0)}，跳过 {info.get('skipped_count', 0)}")
+                self._detail(f"时间线来源：{info.get('timeline_source', '')}")
+                info["details"] = self.details_text
                 logger.info(
                     "Parsed timetable file {} ({} blocks, {} subjects, {} entries)".format(
                         source_file,
@@ -176,12 +224,14 @@ class SyncThread(QThread):
                 self.succeeded.emit((schedule, info), self._reason)
                 return
             username, password = unprotect_account(self._encrypted_account)
-            client = ChaoxingClient()
+            client = ChaoxingClient(detail=self._detail)
             client.login(username, password)
             try:
                 data = client.fetch_issued_courses()
                 issued_courses = True
+                self._detail(f"课程接口：getIssuedCourseInfo，返回 {len(data.get('lessons') or [])} 条课程记录")
             except ChaoxingError as issued_error:
+                self._detail(f"课程接口回退：getMyLessons（{issued_error}）")
                 logger.warning(f"Issued course API failed, falling back: {issued_error}")
                 data = client.fetch_all_lessons(
                     include_timetable=self._sync_timeline,
@@ -189,18 +239,39 @@ class SyncThread(QThread):
                 )
                 data["default_timeline"] = {}
                 issued_courses = False
-            effective_timeline = admin_timeline or data.get("default_timeline") or {}
+            admin_failed = self._sync_timeline and admin_configured and not admin_timeline
+            if not self._sync_timeline:
+                effective_timeline = {}
+            elif admin_configured:
+                effective_timeline = admin_timeline
+            else:
+                effective_timeline = data.get("default_timeline") or {}
             data["timeline_error"] = timeline_error
             schedule, info = build_schedule(
                 data,
                 self._sync_courses,
                 self._sync_timeline,
                 effective_timeline,
+                allow_course_timeline=not admin_failed,
+                exclude_courses=self._exclude_courses,
+                exclude_timeline=self._exclude_timeline,
+                break_limit_minutes=self._break_limit_minutes,
             )
             info["synced_at"] = datetime.now().isoformat(timespec="seconds")
             info["timeline_error"] = timeline_error
-            info["timeline_source"] = "server" if admin_timeline else ("course" if data.get("default_timeline") else "api")
+            if not self._sync_timeline:
+                info["timeline_source"] = "disabled"
+            elif admin_failed:
+                info["timeline_source"] = "unavailable"
+            elif admin_configured:
+                info["timeline_source"] = "server"
+            else:
+                info["timeline_source"] = "course" if data.get("default_timeline") else "api"
+            info["admin_failed"] = admin_failed
             info["issued_courses"] = issued_courses
+            self._detail(f"构建结果：课程 {info.get('course_count', 0)}，时间段 {info.get('entry_count', 0)}，跳过 {info.get('skipped_count', 0)}")
+            self._detail(f"时间线来源：{info.get('timeline_source', '')}")
+            info["details"] = self.details_text
             logger.info(
                 "Chaoxing fetched {} lesson groups across {} weeks ({} weeks failed, {} time slots)".format(
                     info.get("lesson_count", 0),
@@ -236,6 +307,7 @@ def _sanitize_schedule_name(name: str) -> str:
 class Plugin(CW2Plugin):
     configChanged = Signal()
     statusChanged = Signal()
+    statusDetailsChanged = Signal()
     syncStateChanged = Signal()
     accountStateChanged = Signal()
 
@@ -250,6 +322,7 @@ class Plugin(CW2Plugin):
         self._account_checking = False
         self._closing = False
         self._status = ""
+        self._status_details = "尚无同步记录"
         self._account_message = ""
         self._account_error = False
         self._current_interval = 0
@@ -268,7 +341,7 @@ class Plugin(CW2Plugin):
         )
         self.api.ui.register_settings_page(
             "qml/settings.qml",
-            title="超星学习通",
+            title="学习通课表同步",
             icon="ic_fluent_calendar_20_regular",
         )
         self._timer = QTimer(self)
@@ -334,6 +407,18 @@ class Plugin(CW2Plugin):
     def deviceSn(self) -> str:
         return str(self.config.device_sn or "")
 
+    @Property(str, notify=configChanged)
+    def excludeCourses(self) -> str:
+        return str(self.config.exclude_courses or "")
+
+    @Property(str, notify=configChanged)
+    def excludeTimeline(self) -> str:
+        return str(self.config.exclude_timeline or "")
+
+    @Property(int, notify=configChanged)
+    def breakLimitMinutes(self) -> int:
+        return int(self.config.break_limit_minutes)
+
     @Property(bool, notify=syncStateChanged)
     def syncing(self) -> bool:
         return self._syncing
@@ -365,6 +450,10 @@ class Plugin(CW2Plugin):
     @Property(str, notify=statusChanged)
     def statusText(self) -> str:
         return self._status
+
+    @Property(str, notify=statusDetailsChanged)
+    def statusDetails(self) -> str:
+        return self._status_details
 
     @Property(str, notify=configChanged)
     def lastSyncText(self) -> str:
@@ -425,26 +514,24 @@ class Plugin(CW2Plugin):
     def setSyncCourses(self, enabled: bool):
         self.config.sync_courses = bool(enabled)
         self._apply_config()
-        self._set_status(
-            "自动同步已开启" if self.config.sync_courses or self.config.sync_timeline
-            else "同步课程与时间线均已关闭，自动同步已停止"
-        )
+        self._set_status(self._auto_sync_status())
 
     @Slot(bool)
     def setSyncTimeline(self, enabled: bool):
         self.config.sync_timeline = bool(enabled)
         self._apply_config()
-        self._set_status(
-            "自动同步已开启" if self.config.sync_courses or self.config.sync_timeline
-            else "同步课程与时间线均已关闭，自动同步已停止"
-        )
+        self._set_status(self._auto_sync_status())
 
     @Slot(int)
     def setIntervalMinutes(self, minutes: int):
-        value = max(1, min(int(minutes), 1440))
+        value = int(minutes)
+        value = -1 if value < 1 else min(value, 1440)
         self.config.interval_minutes = value
         self._apply_config()
-        self._set_status(f"自动同步间隔已设置为 {value} 分钟")
+        if value < 1:
+            self._set_status("定时同步已关闭，仅保留启动同步和手动同步")
+        else:
+            self._set_status(f"自动同步间隔已设置为 {value} 分钟")
 
     @Slot(str)
     def setScheduleName(self, name: str):
@@ -519,6 +606,25 @@ class Plugin(CW2Plugin):
         self._save_config()
         self.configChanged.emit()
 
+    @Slot(str)
+    def setExcludeCourses(self, value: str):
+        self.config.exclude_courses = str(value or "").strip()
+        self._save_config()
+        self.configChanged.emit()
+
+    @Slot(str)
+    def setExcludeTimeline(self, value: str):
+        self.config.exclude_timeline = str(value or "").strip()
+        self._save_config()
+        self.configChanged.emit()
+
+    @Slot(int)
+    def setBreakLimitMinutes(self, minutes: int):
+        value = max(-1, min(int(minutes), 1440))
+        self.config.break_limit_minutes = value
+        self._save_config()
+        self.configChanged.emit()
+
     @Slot()
     def clearTimetableFile(self):
         self.config.timetable_file = ""
@@ -550,27 +656,45 @@ class Plugin(CW2Plugin):
         self._status = text
         self.statusChanged.emit()
 
+    def _set_status_details(self, text: str):
+        text = str(text or "")
+        if text == self._status_details:
+            return
+        self._status_details = text
+        self.statusDetailsChanged.emit()
+
     def _save_config(self):
         try:
             self.api.config.save()
         except Exception as error:
             logger.warning(f"Failed to save plugin config: {error}")
 
+    def _auto_sync_status(self):
+        if not (self.config.sync_courses or self.config.sync_timeline):
+            return "同步课程与时间线均已关闭，自动同步已停止"
+        if self.intervalMinutes < 1:
+            return "定时同步已关闭，仅保留启动同步和手动同步"
+        return "自动同步已开启"
+
     def _refresh_default_status(self):
         if not self.credentialsConfigured:
             self._set_status("请先设置超星学习通账号")
         elif not (self.config.sync_courses or self.config.sync_timeline):
             self._set_status("已配置账号，但同步课程与时间线均已关闭")
+        elif self.intervalMinutes < 1:
+            self._set_status("定时同步已关闭，仅保留启动同步和手动同步")
         else:
             self._set_status(f"自动同步已开启，间隔 {self.intervalMinutes} 分钟")
 
     def _apply_config(self):
         if self._timer is not None:
-            enabled = self.autoSyncAllowed
-            interval = max(1, min(int(self.config.interval_minutes), 1440)) * 60 * 1000
-            if interval != self._current_interval:
-                self._current_interval = interval
-                self._timer.setInterval(interval)
+            minutes = int(self.config.interval_minutes)
+            enabled = self.autoSyncAllowed and minutes >= 1
+            if minutes >= 1:
+                interval = min(minutes, 1440) * 60 * 1000
+                if interval != self._current_interval:
+                    self._current_interval = interval
+                    self._timer.setInterval(interval)
             if enabled:
                 if not self._timer.isActive():
                     self._timer.start()
@@ -584,7 +708,7 @@ class Plugin(CW2Plugin):
         self._start_sync("startup")
 
     def _auto_sync(self):
-        if self._closing or not self.autoSyncAllowed:
+        if self._closing or not self.autoSyncAllowed or self.intervalMinutes < 1:
             return
         self._start_sync("scheduled")
 
@@ -607,6 +731,7 @@ class Plugin(CW2Plugin):
         self._syncing = True
         self.syncStateChanged.emit()
         self._set_status("正在同步课表…")
+        self._set_status_details("正在同步，请稍候…")
         existing_schedule = (
             self._read_existing_schedule()
             if (timetable_file or timetable_url)
@@ -621,6 +746,9 @@ class Plugin(CW2Plugin):
             timetable_url,
             str(self.config.timeline_server_url or "").strip(),
             str(self.config.device_sn or "").strip(),
+            str(self.config.exclude_courses or ""),
+            str(self.config.exclude_timeline or ""),
+            int(self.config.break_limit_minutes),
             existing_schedule,
         )
         thread.succeeded.connect(self._on_sync_success)
@@ -710,7 +838,7 @@ class Plugin(CW2Plugin):
         )
         if info.get("skipped_count"):
             message += f"，跳过 {info['skipped_count']} 条无效记录"
-        if requested_timeline and not has_timeline:
+        if requested_timeline and not has_timeline and not info.get("admin_failed"):
             if info.get("source") == "xlsx":
                 message += "；目标课表没有可用时间线，已仅同步课程"
             else:
@@ -718,21 +846,26 @@ class Plugin(CW2Plugin):
         if requested_courses and not has_courses:
             message += "；未获取到课程列表"
         source_label = {
-            "server": "admin-system",
+            "server": "晋元学生平板终端集控系统",
             "course": "超星课程接口",
             "target": "目标课表",
             "fallback": "内置节次时间",
             "api": "超星课表接口",
+            "unavailable": "未同步",
+            "disabled": "已关闭",
         }.get(str(info.get("timeline_source") or ""))
         if source_label:
             message += f"；时间线来源：{source_label}"
         if timeline_error:
-            message += "；时间线服务器请求失败，已使用超星课程接口或目标课表时间线"
+            message += "；时间线服务器请求失败，已仅同步课程设置"
         if failed_weeks:
             message += f"；{len(failed_weeks)} 个周次获取失败"
         if not is_current:
             message += "；可在课表设置中切换到该课表"
         self._set_status(message)
+        details = str(info.get("details") or "").strip()
+        self._set_status_details((details + "\n\n" + message).strip() if details else message)
+        self._sync_thread = None
         logger.info(f"Chaoxing schedule synced to {path}")
         suffix = "（部分）" if partial else ""
         title = {
@@ -750,6 +883,10 @@ class Plugin(CW2Plugin):
         self._syncing = False
         self.syncStateChanged.emit()
         self._set_status(f"同步失败：{message}")
+        thread = self._sync_thread
+        details = thread.details_text.strip() if thread is not None else ""
+        self._set_status_details((details + "\n\n错误：" + message).strip() if details else message)
+        self._sync_thread = None
         logger.warning(f"Chaoxing schedule sync failed: {message}")
         title = {
             "startup": "超星学习通启动同步失败",

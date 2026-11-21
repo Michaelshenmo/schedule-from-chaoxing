@@ -1,4 +1,4 @@
-"""Add this read-only route to admin-system/backend/routes/teaching.py.
+"""Add this read-only route to the 晋元学生平板终端集控系统 backend routes/teaching.py.
 
 The plugin requests:
     GET /api/public/teaching/timeline

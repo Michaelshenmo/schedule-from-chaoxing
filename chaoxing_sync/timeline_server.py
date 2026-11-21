@@ -283,7 +283,7 @@ def parse_timeline_payload(payload):
     raise TimelineServerError("时间线接口未返回可识别的节次时间")
 
 
-def fetch_timeline(url, token=""):
+def fetch_timeline(url, token="", detail=None):
     address = str(url or "").strip()
     if not address:
         raise TimelineServerError("未设置时间线服务器地址")
@@ -313,6 +313,8 @@ def fetch_timeline(url, token=""):
     for candidate in candidates:
         try:
             response = requests.get(candidate, headers=headers, timeout=(8, 20))
+            if detail:
+                detail(f"GET {candidate} -> HTTP {response.status_code}")
             if response.status_code == 404:
                 errors.append(f"{candidate}: 404")
                 continue
@@ -322,6 +324,8 @@ def fetch_timeline(url, token=""):
             response.raise_for_status()
             payload = response.json()
             grouped = parse_timeline_payload(payload)
+            if detail:
+                detail(f"时间线接口返回 {len(grouped)} 天，{sum(len(v) for v in grouped.values())} 个节次")
             for day in grouped:
                 grouped[day].sort(key=lambda slot: slot["start"])
             return grouped

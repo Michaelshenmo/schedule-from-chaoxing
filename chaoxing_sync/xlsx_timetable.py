@@ -2,6 +2,8 @@ import hashlib
 import re
 from pathlib import Path
 
+from .breaks import fill_breaks
+from .filters import filter_timeline_slots, is_excluded, split_names
 from .weeks import parse_weeks
 
 
@@ -244,6 +246,9 @@ def _server_slot_times(server_slots, period_count):
     for slot in server_slots or []:
         if not isinstance(slot, dict):
             continue
+        if slot.get("excluded"):
+            ordered.append((slot, None))
+            continue
         start = _normalize_clock(slot.get("start"))
         end = _normalize_clock(slot.get("end"))
         if not start or not end or start >= end:
@@ -254,22 +259,50 @@ def _server_slot_times(server_slots, period_count):
         if period is not None and 1 <= period <= period_count:
             indexed.setdefault(period, pair)
     if indexed:
-        return [indexed.get(index + 1) for index in range(period_count)]
-    filtered = [
-        pair for slot, pair in ordered
-        if not NON_CLASS_PATTERN.search(str(slot.get("name") or ""))
-    ]
-    source = filtered or [pair for _, pair in ordered]
-    return source[:period_count]
+        result = [indexed.get(index + 1) for index in range(period_count)]
+    else:
+        filtered = [
+            None if pair is None or NON_CLASS_PATTERN.search(str(slot.get("name") or "")) else pair
+            for slot, pair in ordered
+        ]
+        source = filtered or [pair for _, pair in ordered]
+        result = source[:period_count]
+    while len(result) < period_count:
+        result.append(None)
+    return result
+
+
+def _server_activity_slots(server_timeline):
+    result = []
+    if not isinstance(server_timeline, dict):
+        return result
+    for day, slots in server_timeline.items():
+        for slot in slots or []:
+            if not isinstance(slot, dict) or slot.get("excluded"):
+                continue
+            if _slot_period(slot) is not None:
+                continue
+            start = _normalize_clock(slot.get("start"))
+            end = _normalize_clock(slot.get("end"))
+            name = str(slot.get("name") or "").strip()
+            if not start or not end or start >= end or not name:
+                continue
+            result.append({
+                "day": int(day) if str(day).isdigit() and 1 <= int(day) <= 7 else 0,
+                "name": name,
+                "start": start,
+                "end": end,
+            })
+    return result
 
 
 def _user_timeline_slots(existing_schedule, day, period_count, server_timeline=None):
     slots = []
-    server_slots = []
-    if isinstance(server_timeline, dict):
+    using_server = isinstance(server_timeline, dict) and bool(server_timeline)
+    if using_server:
         server_slots = server_timeline.get(day) or server_timeline.get(0) or []
-        slots = [pair for pair in _server_slot_times(server_slots, period_count) if pair]
-    if isinstance(existing_schedule, dict) and not slots:
+        slots = _server_slot_times(server_slots, period_count)
+    elif isinstance(existing_schedule, dict):
         candidates = []
         for timeline in existing_schedule.get("days") or []:
             if not isinstance(timeline, dict):
@@ -298,33 +331,37 @@ def _user_timeline_slots(existing_schedule, day, period_count, server_timeline=N
                 end = _normalize_clock(entry.get("endTime"))
                 if start and end and start < end:
                     slots.append((start, end))
-    while len(slots) < period_count:
-        fallback_index = len(slots)
-        if fallback_index < len(DEFAULT_PERIOD_TIMES):
-            slots.append(DEFAULT_PERIOD_TIMES[fallback_index])
-        else:
-            slots.append(("00:00", "00:00"))
+    if not using_server:
+        while len(slots) < period_count:
+            fallback_index = len(slots)
+            if fallback_index < len(DEFAULT_PERIOD_TIMES):
+                slots.append(DEFAULT_PERIOD_TIMES[fallback_index])
+            else:
+                slots.append(("00:00", "00:00"))
+    else:
+        while len(slots) < period_count:
+            slots.append(None)
     return slots
 
 
-def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: bool, sync_timeline: bool, server_timeline=None):
+def build_xlsx_schedule(
+    parsed: dict,
+    existing_schedule: dict,
+    sync_courses: bool,
+    sync_timeline: bool,
+    server_timeline=None,
+    allow_course_timeline: bool = True,
+    exclude_courses: str = "",
+    exclude_timeline: str = "",
+    break_limit_minutes: int = 45,
+):
     blocks = parsed.get("blocks") or []
     period_count = int(parsed.get("period_count") or 9)
     max_week = int(parsed.get("max_week") or 20)
-    has_user_timeline = any(
-        isinstance(timeline, dict)
-        and not str(timeline.get("id") or "").startswith("chaoxing-timeline-")
-        and any(
-            isinstance(entry, dict)
-            and entry.get("type") != "break"
-            and entry.get("startTime")
-            and entry.get("endTime")
-            for entry in timeline.get("entries") or []
-        )
-        for timeline in (existing_schedule.get("days") if isinstance(existing_schedule, dict) else []) or []
-    )
+    course_exclusions = split_names(exclude_courses)
     server_timeline = server_timeline if isinstance(server_timeline, dict) else {}
-    fill_timeline = bool(sync_timeline or has_user_timeline or server_timeline)
+    server_timeline = filter_timeline_slots(server_timeline, split_names(exclude_timeline))
+    fill_timeline = bool(sync_timeline and allow_course_timeline)
     subjects = {}
     subjects_by_key = {}
     timelines = {}
@@ -358,7 +395,7 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
             skipped += 1
             continue
         name = str(block.get("name") or "").strip()
-        if not name:
+        if not name or is_excluded(name, course_exclusions):
             skipped += 1
             continue
         teacher = str(block.get("teacher") or "").strip()
@@ -378,6 +415,7 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
             skipped += 1
             continue
         weeks_value = sorted(weeks) if weeks else "all"
+        group_id = _stable_id("chaoxing-block", day, start_period, end_period, subject_id or name)
         timeline_key = (day, tuple(weeks) if weeks else ("all",))
         timeline = timelines.get(timeline_key)
         if timeline is None:
@@ -390,8 +428,11 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
             }
             timelines[timeline_key] = timeline
         for period in range(start_period, end_period + 1):
-            start_time = slots[period - 1][0]
-            end_time = slots[period - 1][1]
+            slot = slots[period - 1] if period - 1 < len(slots) else None
+            if not slot:
+                skipped += 1
+                continue
+            start_time, end_time = slot
             if start_time >= end_time:
                 skipped += 1
                 continue
@@ -404,6 +445,7 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
                 "type": "class" if sync_courses else "activity",
                 "startTime": start_time,
                 "endTime": end_time,
+                "_breakGroup": group_id,
             }
             if sync_courses:
                 entry["subjectId"] = subject_id
@@ -411,6 +453,34 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
                 entry["title"] = name
             timeline["entries"].append(entry)
             entry_count += 1
+
+    if fill_timeline and server_timeline:
+        for activity in _server_activity_slots(server_timeline):
+            activity_days = [activity["day"]] if activity["day"] else list(range(1, 8))
+            for activity_day in activity_days:
+                key = (activity_day, ("all",))
+                timeline = timelines.get(key)
+                if timeline is None:
+                    timeline = {
+                        "id": _stable_id("chaoxing-timeline", activity_day, "all"),
+                        "dayOfWeek": [activity_day],
+                        "weeks": "all",
+                        "entries": [],
+                        "_ids": set(),
+                    }
+                    timelines[key] = timeline
+                entry_id = _stable_id("chaoxing-activity", activity_day, activity["name"], activity["start"], activity["end"])
+                if entry_id in timeline["_ids"]:
+                    continue
+                timeline["_ids"].add(entry_id)
+                timeline["entries"].append({
+                    "id": entry_id,
+                    "type": "activity",
+                    "startTime": activity["start"],
+                    "endTime": activity["end"],
+                    "title": activity["name"],
+                })
+                entry_count += 1
 
     for timeline in timelines.values():
         timeline.pop("_ids", None)
@@ -432,10 +502,10 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
             "startDate": start_date,
         },
         "subjects": sorted(subjects.values(), key=lambda item: item["name"]),
-        "days": sorted(
+        "days": fill_breaks(sorted(
             timelines.values(),
             key=lambda item: (item["dayOfWeek"][0], item["entries"][0]["startTime"] if item["entries"] else ""),
-        ),
+        ), max_week, break_limit_minutes),
         "overrides": [],
     }
     info = {
@@ -451,7 +521,7 @@ def build_xlsx_schedule(parsed: dict, existing_schedule: dict, sync_courses: boo
         "sync_courses": bool(sync_courses),
         "sync_timeline": bool(sync_timeline),
         "fill_timeline": bool(fill_timeline),
-        "timeline_source": "server" if server_timeline else ("target" if has_user_timeline else "fallback"),
+        "timeline_source": "disabled" if not sync_timeline else ("unavailable" if not allow_course_timeline else ("server" if server_timeline else ("target" if existing_schedule else "fallback"))),
         "timetable_error": "",
         "course_error": "",
         "source": "xlsx",

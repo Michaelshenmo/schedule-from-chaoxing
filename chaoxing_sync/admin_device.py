@@ -62,7 +62,7 @@ def _save_state(state: dict):
     temp.replace(path)
 
 
-def _post(server: str, path: str, payload: dict) -> dict:
+def _post(server: str, path: str, payload: dict, detail=None) -> dict:
     try:
         response = requests.post(
             server + path,
@@ -71,18 +71,20 @@ def _post(server: str, path: str, payload: dict) -> dict:
             headers={"Accept": "application/json", "Content-Type": "application/json"},
         )
     except requests.RequestException as error:
-        raise AdminDeviceError(f"请求 admin-system 失败：{error}") from error
+        raise AdminDeviceError(f"请求晋元学生平板终端集控系统失败：{error}") from error
+    if detail:
+        detail(f"POST {path} -> HTTP {response.status_code}")
     try:
         data = response.json()
     except ValueError as error:
-        raise AdminDeviceError(f"admin-system 返回异常：HTTP {response.status_code}") from error
+        raise AdminDeviceError(f"晋元学生平板终端集控系统返回异常：HTTP {response.status_code}") from error
     if response.status_code >= 400 or not isinstance(data, dict) or data.get("code") != 0:
         message = data.get("msg") if isinstance(data, dict) else ""
-        raise AdminDeviceError(message or f"admin-system 返回 HTTP {response.status_code}")
+        raise AdminDeviceError(message or f"晋元学生平板终端集控系统返回 HTTP {response.status_code}")
     return data.get("data") or {}
 
 
-def _vendor_login(sn: str) -> str:
+def _vendor_login(sn: str, detail=None) -> str:
     try:
         response = requests.post(
             HANGZHI_BASE + "/register/queryDeviceToken",
@@ -96,6 +98,8 @@ def _vendor_login(sn: str) -> str:
         data = response.json()
     except ValueError as error:
         raise AdminDeviceError("设备认证返回格式异常") from error
+    if detail:
+        detail(f"POST /register/queryDeviceToken -> HTTP {response.status_code}")
     if not isinstance(data, dict) or data.get("code") != 0:
         message = data.get("msg") if isinstance(data, dict) else ""
         raise AdminDeviceError(message or "设备 SN 认证失败")
@@ -105,7 +109,7 @@ def _vendor_login(sn: str) -> str:
     return str(token)
 
 
-def _vendor_user(token: str) -> dict:
+def _vendor_user(token: str, detail=None) -> dict:
     try:
         response = requests.get(
             HANGZHI_BASE + "/device/queryDeviceDetailInfo.svl",
@@ -118,6 +122,8 @@ def _vendor_user(token: str) -> dict:
         data = response.json()
     except ValueError as error:
         raise AdminDeviceError("设备信息返回格式异常") from error
+    if detail:
+        detail(f"GET /device/queryDeviceDetailInfo.svl -> HTTP {response.status_code}")
     if not isinstance(data, dict) or data.get("code") != 0 or not isinstance(data.get("data"), dict):
         raise AdminDeviceError("设备信息获取失败")
     return data["data"]
@@ -147,7 +153,7 @@ def _ensure_key(state: dict):
     return key
 
 
-def _enroll(server: str, state: dict, vendor_token: str, device_id: str) -> dict:
+def _enroll(server: str, state: dict, vendor_token: str, device_id: str, detail=None) -> dict:
     key = _ensure_key(state)
     installation = str(state.get("installationId") or uuid.uuid4())
     state["installationId"] = installation
@@ -158,7 +164,7 @@ def _enroll(server: str, state: dict, vendor_token: str, device_id: str) -> dict
         "publicKey": public,
         "signature": _sign(key, f"ENROLL\n{installation}\n{device_id}"),
         "vendorToken": vendor_token,
-    })
+    }, detail)
     request_id = str(data.get("requestId") or "")
     nonce = str(data.get("nonce") or "")
     if not request_id or not nonce:
@@ -170,8 +176,10 @@ def _enroll(server: str, state: dict, vendor_token: str, device_id: str) -> dict
             "requestId": request_id,
             "signature": _sign(key, f"ENROLL_POLL\n{request_id}\n{nonce}"),
             "vendorToken": vendor_token,
-        })
+        }, detail)
         status = str(reply.get("status") or "")
+        if detail:
+            detail(f"设备注册状态：{status or '未知'}")
         if status == "APPROVED":
             binding = reply.get("binding") or {}
             if not binding.get("bindingId"):
@@ -186,12 +194,12 @@ def _enroll(server: str, state: dict, vendor_token: str, device_id: str) -> dict
     raise AdminDeviceError("设备注册仍在审核中，请联系管理员")
 
 
-def _policy(server: str, state: dict, binding: dict) -> dict:
+def _policy(server: str, state: dict, binding: dict, detail=None) -> dict:
     key = _ensure_key(state)
     binding_id = str(binding.get("bindingId") or "")
     if not binding_id:
         raise AdminDeviceError("设备绑定信息缺失")
-    challenge = _post(server, "/api/device/challenge", {"bindingId": binding_id})
+    challenge = _post(server, "/api/device/challenge", {"bindingId": binding_id}, detail)
     nonce = str(challenge.get("nonce") or "")
     if not nonce:
         raise AdminDeviceError("设备认证未返回 nonce")
@@ -202,7 +210,7 @@ def _policy(server: str, state: dict, binding: dict) -> dict:
         "nonce": nonce,
         "requestPayload": raw,
         "signature": signature,
-    })
+    }, detail)
     envelopes = reply.get("envelopes") or []
     documents = []
     for envelope in envelopes:
@@ -227,10 +235,12 @@ def _policy(server: str, state: dict, binding: dict) -> dict:
     document = max(valid or documents, key=lambda item: int(item.get("revision") or 0))
     schedule = document.get("schedule") or {}
     grouped = parse_timeline_payload({"data": {"schedule": schedule}})
+    if detail:
+        detail(f"策略信封：{len(envelopes)} 个，选用 revision={document.get('revision', '')}，节次={sum(len(v) for v in grouped.values())}")
     return grouped
 
 
-def fetch_admin_timeline(server: str, sn: str) -> dict:
+def fetch_admin_timeline(server: str, sn: str, detail=None) -> dict:
     server = _normalize_server(server)
     sn = str(sn or "").strip()
     if not sn:
@@ -243,21 +253,23 @@ def fetch_admin_timeline(server: str, sn: str) -> dict:
         state["server"] = server
         state["binding"] = {}
         _save_state(state)
-    vendor_token = _vendor_login(sn)
-    user = _vendor_user(vendor_token)
+    vendor_token = _vendor_login(sn, detail)
+    user = _vendor_user(vendor_token, detail)
     device_id = str(user.get("deviceId") or "").strip()
     if not device_id:
         raise AdminDeviceError("设备信息中缺少 deviceId")
     binding = state.get("binding") or {}
     if str(binding.get("deviceId") or "") != device_id or not binding.get("bindingId"):
-        binding = _enroll(server, state, vendor_token, device_id)
+        binding = _enroll(server, state, vendor_token, device_id, detail)
     try:
-        return _policy(server, state, binding)
+        return _policy(server, state, binding, detail)
     except AdminDeviceError as error:
         message = str(error)
         if "绑定" not in message and "认证" not in message and "401" not in message:
             raise
         state["binding"] = {}
         _save_state(state)
-        binding = _enroll(server, state, vendor_token, device_id)
-        return _policy(server, state, binding)
+        if detail:
+            detail("设备绑定失效，重新注册")
+        binding = _enroll(server, state, vendor_token, device_id, detail)
+        return _policy(server, state, binding, detail)

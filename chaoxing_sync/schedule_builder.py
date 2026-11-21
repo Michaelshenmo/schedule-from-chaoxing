@@ -3,7 +3,9 @@ import json
 import re
 from datetime import date, datetime, timedelta
 
-from .xlsx_timetable import _server_slot_times
+from .breaks import fill_breaks
+from .filters import filter_timeline_slots, is_excluded, split_names
+from .xlsx_timetable import _server_activity_slots, _server_slot_times, _slot_period
 
 
 class ScheduleBuildError(Exception):
@@ -207,6 +209,17 @@ def _lesson_times(lesson: dict, times):
     return start, finish
 
 
+def _server_period_excluded(server_timeline, day, begin, end):
+    slots = server_timeline.get(day) or server_timeline.get(0) or []
+    for index, slot in enumerate(slots, start=1):
+        if not isinstance(slot, dict) or not slot.get("excluded"):
+            continue
+        period = _slot_period(slot) or index
+        if begin <= period <= end:
+            return True
+    return False
+
+
 def _server_lesson_times(lesson: dict, server_timeline):
     try:
         day = int(lesson.get("dayOfWeek") or lesson.get("weekDay") or 0)
@@ -232,7 +245,16 @@ def _server_lesson_times(lesson: dict, server_timeline):
     return start, finish
 
 
-def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool, server_timeline=None):
+def build_schedule(
+    data: dict,
+    sync_courses: bool,
+    sync_timeline: bool,
+    server_timeline=None,
+    allow_course_timeline: bool = True,
+    exclude_courses: str = "",
+    exclude_timeline: str = "",
+    break_limit_minutes: int = 45,
+):
     curriculum = data.get("curriculum") or {}
     lessons = data.get("lessons") or []
     courses = data.get("courses") or []
@@ -240,7 +262,9 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool, server_t
         raise ScheduleBuildError("课表数据格式异常")
     times = parse_time_config(_extract_time_values(curriculum))
     server_timeline = server_timeline if isinstance(server_timeline, dict) else {}
-    fill_timeline = bool(sync_timeline or server_timeline)
+    course_exclusions = split_names(exclude_courses)
+    server_timeline = filter_timeline_slots(server_timeline, split_names(exclude_timeline))
+    fill_timeline = bool(sync_timeline and allow_course_timeline)
 
     subjects = {}
     subjects_by_name = {}
@@ -272,12 +296,27 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool, server_t
         subjects_by_name[name] = subject
         return subject_id
 
+    def timeline_for(day: int, weeks):
+        weeks_value = "all" if weeks == ["all"] else list(weeks)
+        key = (day, tuple(weeks) if weeks != ["all"] else ("all",))
+        timeline = timelines.get(key)
+        if timeline is None:
+            timeline = {
+                "id": _stable_id("cxd", day, *key[1]),
+                "dayOfWeek": [day],
+                "weeks": weeks_value,
+                "entries": [],
+                "_ids": set(),
+            }
+            timelines[key] = timeline
+        return timeline
+
     if sync_courses:
         for course in courses:
             if not isinstance(course, dict):
                 continue
             name = str(course.get("name") or "").strip()
-            if not name:
+            if not name or is_excluded(name, course_exclusions):
                 continue
             ensure_subject(name, str(course.get("teacher") or "").strip(), "")
 
@@ -292,6 +331,9 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool, server_t
             or ""
         ).strip()
         if not name:
+            skipped += 1
+            continue
+        if is_excluded(name, course_exclusions):
             skipped += 1
             continue
         teacher = str(lesson.get("teacherName") or lesson.get("teacher") or "").strip()
@@ -312,32 +354,41 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool, server_t
             if number >= 1:
                 week_values.add(number)
         weeks = sorted(week_values)
-        lesson_times = _server_lesson_times(lesson, server_timeline) if server_timeline else _lesson_times(lesson, times)
+        entry_type = "class" if sync_courses else "activity"
+        lesson_times = None
+        if server_timeline:
+            begin_number = lesson.get("beginNumber") or lesson.get("startSection") or 0
+            length = lesson.get("length") or lesson.get("sectionLength") or 1
+            try:
+                begin_number = int(begin_number)
+                length = int(length)
+            except (TypeError, ValueError):
+                begin_number, length = 0, 1
+            if begin_number >= 1 and _server_period_excluded(
+                server_timeline, day, begin_number, begin_number + length - 1,
+            ):
+                skipped += 1
+                continue
+            lesson_times = _server_lesson_times(lesson, server_timeline)
+            if lesson_times is None:
+                lesson_times = _lesson_times(lesson, times)
+                if lesson_times is not None:
+                    entry_type = "activity"
+        else:
+            lesson_times = _lesson_times(lesson, times)
         if not (1 <= day <= 7) or not weeks or not lesson_times:
             skipped += 1
             continue
         start, finish = lesson_times
-        entry_id = _stable_id("cxe", day, start, finish, subject_id or name)
-
-        timeline_key = (day, tuple(weeks))
-        timeline = timelines.get(timeline_key)
-        if timeline is None:
-            timeline = {
-                "id": _stable_id("cxd", day, *weeks),
-                "dayOfWeek": [day],
-                "weeks": list(weeks),
-                "entries": [],
-                "_ids": set(),
-            }
-            timelines[timeline_key] = timeline
-
+        entry_id = _stable_id("cxe", day, start, finish, subject_id or name, entry_type)
+        timeline = timeline_for(day, weeks)
         entry = {
             "id": entry_id,
-            "type": "class" if sync_courses else "activity",
+            "type": entry_type,
             "startTime": start,
             "endTime": finish,
         }
-        if sync_courses:
+        if entry_type == "class":
             entry["subjectId"] = subject_id
         else:
             entry["title"] = name
@@ -346,6 +397,27 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool, server_t
         timeline["_ids"].add(entry_id)
         timeline["entries"].append(entry)
         entry_count += 1
+
+    if fill_timeline and server_timeline:
+        for activity in _server_activity_slots(server_timeline):
+            activity_days = [activity["day"]] if activity["day"] else list(range(1, 8))
+            for activity_day in activity_days:
+                timeline = timeline_for(activity_day, ["all"])
+                entry_id = _stable_id(
+                    "cxe-activity", activity_day, activity["name"],
+                    activity["start"], activity["end"],
+                )
+                if entry_id in timeline["_ids"]:
+                    continue
+                timeline["_ids"].add(entry_id)
+                timeline["entries"].append({
+                    "id": entry_id,
+                    "type": "activity",
+                    "startTime": activity["start"],
+                    "endTime": activity["end"],
+                    "title": activity["name"],
+                })
+                entry_count += 1
 
     for timeline in timelines.values():
         timeline.pop("_ids", None)
@@ -356,6 +428,7 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool, server_t
         timelines.values(),
         key=lambda item: (item["dayOfWeek"][0], item["entries"][0]["startTime"] if item["entries"] else ""),
     )
+    day_list = fill_breaks(day_list, int(data.get("max_week") or 0), break_limit_minutes)
     uuid = str(curriculum.get("uuid") or "").strip()
     meta_id = f"chaoxing-{uuid}" if uuid else "chaoxing-schedule"
     schedule = {
@@ -382,7 +455,7 @@ def build_schedule(data: dict, sync_courses: bool, sync_timeline: bool, server_t
         "sync_courses": bool(sync_courses),
         "sync_timeline": bool(sync_timeline),
         "fill_timeline": bool(fill_timeline),
-        "timeline_source": "server" if server_timeline else "api",
+        "timeline_source": "disabled" if not sync_timeline else ("unavailable" if not allow_course_timeline else ("server" if server_timeline else "api")),
         "timeline_error": str(data.get("timeline_error") or ""),
         "timetable_error": str(data.get("timetable_error") or ""),
         "course_error": str(data.get("course_error") or ""),

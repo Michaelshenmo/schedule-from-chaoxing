@@ -41,15 +41,21 @@ def _encrypt_field(value: str) -> str:
 
 
 class ChaoxingClient:
-    def __init__(self, timeout=(10, 25)):
+    def __init__(self, timeout=(10, 25), detail=None):
         self.timeout = timeout
+        self.detail = detail
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": USER_AGENT,
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
 
+    def _detail(self, message: str):
+        if self.detail:
+            self.detail(str(message))
+
     def login(self, username: str, password: str) -> None:
+        self._detail("GET passport2.chaoxing.com/login")
         try:
             self.session.get(LOGIN_PAGE, timeout=self.timeout)
             response = self.session.post(
@@ -70,6 +76,7 @@ class ChaoxingClient:
             )
             response.raise_for_status()
             data = response.json()
+            self._detail("POST passport2.chaoxing.com/fanyalogin")
         except ValueError as error:
             raise AuthError("登录响应异常，可能需要验证码或账号受限") from error
         except requests.RequestException as error:
@@ -79,6 +86,7 @@ class ChaoxingClient:
         if not data.get("status"):
             message = data.get("msg2") or data.get("msg") or "账号或密码错误"
             raise AuthError(str(message))
+        self._detail("登录成功")
         if data.get("containTwoFactorLogin"):
             raise AuthError("该账号需要二次验证，暂不支持自动同步")
         try:
@@ -87,6 +95,7 @@ class ChaoxingClient:
             pass
 
     def _get_json(self, url: str, params=None, headers=None, retries: int = 2):
+        self._detail(f"GET {url}")
         last_error = None
         for attempt in range(retries + 1):
             try:
@@ -227,6 +236,7 @@ class ChaoxingClient:
         )
         portal.raise_for_status()
         final_url = portal.url
+        self._detail(f"课表入口 fid={fid} -> HTTP {portal.status_code}")
         if "course.chaoxing.com" not in final_url:
             raise ChaoxingError("课表入口未跳转到超星课表")
         query = parse_qs(urlparse(final_url).query)
@@ -239,6 +249,7 @@ class ChaoxingClient:
             task_id = match.group(1) if match else ""
         if not task_id or not user_id:
             raise ChaoxingError("未解析到课表 taskId/userId")
+        self._detail("GET course.chaoxing.com/svcourse/new/timetable/getIssuedCourseInfo（weekNum=all）")
         response = self._get_json(
             ISSUED_COURSES_ENDPOINT,
             params={
@@ -262,6 +273,7 @@ class ChaoxingClient:
             raise ChaoxingError("课表接口返回失败")
         data = response.get("data") or {}
         rows = data.get("data") or []
+        self._detail(f"课表接口返回 success={response.get('success')}，rows={len(rows) if isinstance(rows, list) else 0}")
         if not isinstance(rows, list) or not rows:
             raise ChaoxingError("课表接口未返回课程")
         lessons = []
@@ -314,6 +326,7 @@ class ChaoxingClient:
         if start_timestamp is None:
             start_timestamp = int((time.time() - max(0, max_week - 1) * 7 * 86400) * 1000)
         default_timeline = self._default_timeline(data)
+        self._detail(f"解析课程 {len(lessons)} 节 / {len(courses)} 门，周次上限 {max_week}，默认时间线 {len(default_timeline)} 天")
         curriculum = {
             "uuid": f"svcourse-{task_id}",
             "fid": fid,
@@ -443,6 +456,7 @@ class ChaoxingClient:
         if not courses and not lessons:
             message = timetable_error or course_error or "未获取到课程或课表数据"
             raise ChaoxingError(message)
+        self._detail(f"回退课表：课程 {len(courses)} 门，课程记录 {len(lessons)} 节，失败周次 {len(failed_weeks)}")
         return {
             "curriculum": curriculum,
             "lessons": lessons,
