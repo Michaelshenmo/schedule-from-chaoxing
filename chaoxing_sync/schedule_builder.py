@@ -5,7 +5,11 @@ from datetime import date, datetime, timedelta
 
 from .breaks import fill_breaks, merge_day_timelines
 from .filters import filter_timeline_slots, is_excluded, split_names
-from .xlsx_timetable import _server_activity_slots, _server_slot_times, _slot_period
+from .xlsx_timetable import (
+    _server_activity_slots,
+    _server_period_excluded,
+    _server_slot_times,
+)
 
 
 class ScheduleBuildError(Exception):
@@ -207,17 +211,6 @@ def _lesson_times(lesson: dict, times):
     if start >= finish:
         return None
     return start, finish
-
-
-def _server_period_excluded(server_timeline, day, begin, end):
-    slots = server_timeline.get(day) or server_timeline.get(0) or []
-    for index, slot in enumerate(slots, start=1):
-        if not isinstance(slot, dict) or not slot.get("excluded"):
-            continue
-        period = _slot_period(slot) or index
-        if begin <= period <= end:
-            return True
-    return False
 
 
 def _server_lesson_times(lesson: dict, server_timeline):

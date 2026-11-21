@@ -197,22 +197,7 @@ def parse_timetable_xlsx(path) -> dict:
     }
 
 
-CHINESE_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-NON_CLASS_PATTERN = re.compile(r"早自修|早读|课间|眼保健操|午休|晚自习|放学|升旗|自习")
-
-
-def _chinese_number(text):
-    if not text:
-        return None
-    if text in CHINESE_DIGITS:
-        return CHINESE_DIGITS[text]
-    if text.startswith("十") and len(text) == 2 and text[1] in CHINESE_DIGITS:
-        return 10 + CHINESE_DIGITS[text[1]]
-    if len(text) == 2 and text[0] in CHINESE_DIGITS and text[1] == "十":
-        return CHINESE_DIGITS[text[0]] * 10
-    if len(text) == 3 and text[0] in CHINESE_DIGITS and text[1] == "十" and text[2] in CHINESE_DIGITS:
-        return CHINESE_DIGITS[text[0]] * 10 + CHINESE_DIGITS[text[2]]
-    return None
+NON_CLASS_PATTERN = re.compile(r"早自修|早读|课间|眼保健操|午休|晚自习|放学|升旗|自习|活动|体锻|课后服务|就餐|午餐|晚餐")
 
 
 def _slot_period(slot):
@@ -228,48 +213,72 @@ def _slot_period(slot):
             continue
         if number >= 1:
             return number
-    name = str(slot.get("name") or "").strip()
-    match = re.search(r"第\s*(\d+)\s*节", name)
-    if match:
-        return int(match.group(1))
-    match = re.search(r"第\s*([一二三四五六七八九十]+)\s*节", name)
-    if match:
-        return _chinese_number(match.group(1))
-    if name.isdigit():
-        return int(name)
     return None
 
 
-def _server_slot_times(server_slots, period_count):
-    indexed = {}
-    ordered = []
+def _slot_clock_pair(slot):
+    start = _normalize_clock(slot.get("start"))
+    end = _normalize_clock(slot.get("end"))
+    if not start or not end or start >= end:
+        return None
+    return start, end
+
+
+def _server_slot_layout(server_slots, period_count):
+    """Split server slots into class periods and extra (rest/activity) slots.
+
+    Some servers return explicit ``period`` numbers. Others (such as the control
+    system policy) only return an ordered list containing rest slots like
+    "早自修" or "课间活动", so class periods are inferred by skipping those names.
+    """
+    count = max(1, int(period_count or 1))
+    slots = []
     for slot in server_slots or []:
         if not isinstance(slot, dict):
             continue
+        slots.append((slot, _slot_clock_pair(slot)))
+    slots.sort(key=lambda item: (item[1] or ("99:99", "99:99")))
+
+    pairs = [None] * count
+    extras = []
+    excluded_periods = set()
+    has_explicit = any(_slot_period(slot) is not None for slot, _ in slots)
+
+    if has_explicit:
+        for slot, pair in slots:
+            period = _slot_period(slot)
+            if period is None:
+                extras.append(slot)
+                continue
+            if not 1 <= period <= count:
+                continue
+            if slot.get("excluded"):
+                excluded_periods.add(period)
+                continue
+            if pair and pairs[period - 1] is None:
+                pairs[period - 1] = pair
+        return pairs, extras, excluded_periods
+
+    index = 0
+    for slot, pair in slots:
+        name = str(slot.get("name") or "")
+        if NON_CLASS_PATTERN.search(name):
+            extras.append(slot)
+            continue
+        index += 1
+        if index > count:
+            continue
         if slot.get("excluded"):
-            ordered.append((slot, None))
+            excluded_periods.add(index)
             continue
-        start = _normalize_clock(slot.get("start"))
-        end = _normalize_clock(slot.get("end"))
-        if not start or not end or start >= end:
-            continue
-        pair = (start, end)
-        ordered.append((slot, pair))
-        period = _slot_period(slot)
-        if period is not None and 1 <= period <= period_count:
-            indexed.setdefault(period, pair)
-    if indexed:
-        result = [indexed.get(index + 1) for index in range(period_count)]
-    else:
-        filtered = [
-            None if pair is None or NON_CLASS_PATTERN.search(str(slot.get("name") or "")) else pair
-            for slot, pair in ordered
-        ]
-        source = filtered or [pair for _, pair in ordered]
-        result = source[:period_count]
-    while len(result) < period_count:
-        result.append(None)
-    return result
+        if pair:
+            pairs[index - 1] = pair
+    return pairs, extras, excluded_periods
+
+
+def _server_slot_times(server_slots, period_count):
+    pairs, _, _ = _server_slot_layout(server_slots, period_count)
+    return pairs
 
 
 def _server_activity_slots(server_timeline):
@@ -277,23 +286,29 @@ def _server_activity_slots(server_timeline):
     if not isinstance(server_timeline, dict):
         return result
     for day, slots in server_timeline.items():
-        for slot in slots or []:
-            if not isinstance(slot, dict) or slot.get("excluded"):
+        extras = _server_slot_layout(slots, len(slots or []))[1]
+        for slot in extras:
+            if slot.get("excluded"):
                 continue
-            if _slot_period(slot) is not None:
-                continue
-            start = _normalize_clock(slot.get("start"))
-            end = _normalize_clock(slot.get("end"))
+            pair = _slot_clock_pair(slot)
             name = str(slot.get("name") or "").strip()
-            if not start or not end or start >= end or not name:
+            if not pair or not name:
                 continue
             result.append({
                 "day": int(day) if str(day).isdigit() and 1 <= int(day) <= 7 else 0,
                 "name": name,
-                "start": start,
-                "end": end,
+                "start": pair[0],
+                "end": pair[1],
             })
     return result
+
+
+def _server_period_excluded(server_timeline, day, begin, end):
+    if not isinstance(server_timeline, dict):
+        return False
+    slots = server_timeline.get(day) or server_timeline.get(0) or []
+    _, _, excluded_periods = _server_slot_layout(slots, max(len(slots), end))
+    return any(begin <= period <= end for period in excluded_periods)
 
 
 def _user_timeline_slots(existing_schedule, day, period_count, server_timeline=None):

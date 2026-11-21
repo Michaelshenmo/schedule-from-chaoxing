@@ -153,6 +153,11 @@ def _policy_schedule_slots(schedule):
         if not start or not end or start >= end:
             continue
         name = str(slot.get("name") or slot.get("id") or "节次")
+        period = slot.get("period") or slot.get("section") or slot.get("periodIndex")
+        try:
+            period = int(period) if period is not None else None
+        except (TypeError, ValueError):
+            period = None
         weekdays = slot.get("weekdays") or slot.get("days") or [0]
         if not isinstance(weekdays, (list, tuple)):
             weekdays = [weekdays]
@@ -164,7 +169,7 @@ def _policy_schedule_slots(schedule):
                 "name": name,
                 "start": start,
                 "end": end,
-                "period": None,
+                "period": period,
                 "dayOfWeek": day,
             })
     return grouped
