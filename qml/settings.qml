@@ -642,12 +642,57 @@ FluentPage {
             }
         }
 
-        Text {
+        SettingExpander {
             Layout.fillWidth: true
-            typography: Typography.Caption
-            color: Theme.currentTheme.colors.textSecondaryColor
-            wrapMode: Text.Wrap
-            text: "账号密码会加密保存在 Class Widgets 配置中，设置页面不会回显已保存的账号。"
+            expanded: false
+            icon.name: "ic_fluent_info_20_regular"
+            title: "关于"
+            description: "插件仓库、插件广场与作者信息"
+
+            SettingItem {
+                title: "GitHub 仓库"
+                description: "https://github.com/Michaelshenmo/schedule-from-chaoxing"
+
+                Button {
+                    text: "打开"
+                    icon.name: "ic_fluent_open_20_regular"
+                    onClicked: Qt.openUrlExternally("https://github.com/Michaelshenmo/schedule-from-chaoxing")
+                }
+            }
+
+            SettingItem {
+                title: "插件广场"
+                description: "https://plaza.cw.rinlit.cn/plugins/com.msyark.chaoxingsync"
+
+                Button {
+                    text: "打开"
+                    icon.name: "ic_fluent_open_20_regular"
+                    onClicked: Qt.openUrlExternally("https://plaza.cw.rinlit.cn/plugins/com.msyark.chaoxingsync")
+                }
+            }
+
+            Item {
+                Layout.fillWidth: true
+                Layout.leftMargin: 58
+                Layout.rightMargin: 44
+                Layout.topMargin: 10
+                Layout.bottomMargin: 12
+                Layout.preferredHeight: creditText.implicitHeight
+
+                Text {
+                    id: creditText
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    typography: Typography.Caption
+                    color: Theme.currentTheme.colors.textSecondaryColor
+                    textFormat: Text.RichText
+                    wrapMode: Text.Wrap
+                    text: '本插件由<a href="https://github.com/Michaelshenmo">Michaelshenmo</a>在DeepSeek V4.1 Flash 1017与GPT 6.1 sol的帮助下完成编写'
+                    onLinkActivated: function(link) {
+                        Qt.openUrlExternally(link)
+                    }
+                }
+            }
         }
     }
 }
