@@ -1,7 +1,7 @@
 {
   "id": "com.msyark.chaoxingsync",
   "name": "超星学习通课表同步",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "api_version": "~=0.7.0",
   "entry": "main.py",
   "author": "Michaelshenmo",
