@@ -27,7 +27,7 @@ body = """
 
 {% if version %}
   {% if previous.version %}
-**完整 Changelog**: 版本对比 {{ previous.version }} → {{ version }}
+**完整 Changelog**: [{{ previous.version }} → {{ version }}](https://github.com/Michaelshenmo/schedule-from-chaoxing/compare/{{ previous.version }}...{{ version }})
   {% endif %}
 {% else -%}
   {% raw %}

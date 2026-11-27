@@ -22,6 +22,17 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Install git-cliff
+        run: |
+          cargo install git-cliff
+
       - name: Install dependencies
         run: |
           pip install -e ".[dev]"
@@ -39,22 +50,17 @@ jobs:
         run: |
           cw-plugin-publish
 
-      - name: Get version and previous tag
-        id: version
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v*.*.*' HEAD^ 2>/dev/null || true)"
-          echo "PREVIOUS_TAG=$PREVIOUS_TAG" >> "$GITHUB_ENV"
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
 
-      - name: Build release notes
+      - name: Generate changelog with git-cliff
+        id: generate_changelog
         run: |
-          REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
-          if [ -n "${PREVIOUS_TAG}" ]; then
-            echo "RELEASE_NOTES=**Comparing changes**: [${PREVIOUS_TAG}...v${VERSION}](${REPO_URL}/compare/${PREVIOUS_TAG}...v${VERSION})" >> "$GITHUB_ENV"
-          else
-            echo "RELEASE_NOTES=**Release**: [v${VERSION}](${REPO_URL}/releases/tag/v${VERSION})" >> "$GITHUB_ENV"
-          fi
+          git-cliff --config .git-cliff.toml --tag v${{ env.VERSION }} > CHANGELOG.md
+          echo "CHANGELOG<<EOF" >> $GITHUB_ENV
+          cat CHANGELOG.md >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Create Release
         id: create_release
@@ -66,5 +72,5 @@ jobs:
           files: |
             *.cwplugin
             *.zip
-          body: ${{ env.RELEASE_NOTES }}
+          body: ${{ env.CHANGELOG }}
           generate_release_notes: false
