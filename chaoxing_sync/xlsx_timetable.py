@@ -4,6 +4,14 @@ from pathlib import Path
 
 from .breaks import fill_breaks, merge_day_timelines
 from .filters import filter_timeline_slots, is_excluded, split_names
+from .mappings import (
+    apply_break_rules,
+    apply_clock_override,
+    apply_timeline_rules,
+    match_rule,
+    mapping_title,
+    normalize_rules,
+)
 from .weeks import parse_weeks
 
 
@@ -369,13 +377,16 @@ def build_xlsx_schedule(
     exclude_courses: str = "",
     exclude_timeline: str = "",
     break_limit_minutes: int = 45,
+    mappings=None,
 ):
     blocks = parsed.get("blocks") or []
     period_count = int(parsed.get("period_count") or 9)
     max_week = int(parsed.get("max_week") or 20)
+    rules = normalize_rules(mappings)
     course_exclusions = split_names(exclude_courses)
     server_timeline = server_timeline if isinstance(server_timeline, dict) else {}
     server_timeline = filter_timeline_slots(server_timeline, split_names(exclude_timeline))
+    server_timeline = apply_timeline_rules(server_timeline, rules)
     fill_timeline = bool(sync_timeline and allow_course_timeline)
     subjects = {}
     subjects_by_key = {}
@@ -405,17 +416,26 @@ def build_xlsx_schedule(
         subjects_by_key[subject_key] = subject
         return subject_id
 
+    def rename_subject(subject_id: str, title: str):
+        subject = subjects.get(subject_id)
+        if subject is not None and title:
+            subject["name"] = title
+            subject["simplifiedName"] = _simplified_name(title)
+
     for block in blocks:
         if not isinstance(block, dict):
             skipped += 1
             continue
         name = str(block.get("name") or "").strip()
-        if not name or is_excluded(name, course_exclusions):
+        rule = match_rule(name, rules, "course")
+        if not name or is_excluded(name, course_exclusions) or (rule and rule.get("exclude")):
             skipped += 1
             continue
         teacher = str(block.get("teacher") or "").strip()
         location = str(block.get("location") or "").strip()
         subject_id = ensure_subject(name, teacher, location) if sync_courses else ""
+        if rule:
+            rename_subject(subject_id, rule.get("title"))
         if not fill_timeline:
             continue
         day = int(block.get("dayOfWeek") or 0)
@@ -442,6 +462,31 @@ def build_xlsx_schedule(
                 "_ids": set(),
             }
             timelines[timeline_key] = timeline
+
+        if rule and (rule.get("start") or rule.get("end")):
+            first_slot = slots[start_period - 1] if start_period - 1 < len(slots) else None
+            last_slot = slots[end_period - 1] if end_period - 1 < len(slots) else None
+            start_time = rule.get("start") or (first_slot[0] if first_slot else "")
+            end_time = rule.get("end") or (last_slot[1] if last_slot else "")
+            if start_time and end_time and start_time < end_time:
+                entry_id = _stable_id("chaoxing-entry", day, start_time, end_time, subject_id or name)
+                if entry_id not in timeline["_ids"]:
+                    timeline["_ids"].add(entry_id)
+                    entry = {
+                        "id": entry_id,
+                        "type": "class" if sync_courses else "activity",
+                        "startTime": start_time,
+                        "endTime": end_time,
+                        "_breakGroup": group_id,
+                    }
+                    if sync_courses:
+                        entry["subjectId"] = subject_id
+                    else:
+                        entry["title"] = mapping_title(name, rule)
+                    timeline["entries"].append(entry)
+                    entry_count += 1
+                continue
+
         for period in range(start_period, end_period + 1):
             slot = slots[period - 1] if period - 1 < len(slots) else None
             if not slot:
@@ -465,7 +510,7 @@ def build_xlsx_schedule(
             if sync_courses:
                 entry["subjectId"] = subject_id
             else:
-                entry["title"] = name
+                entry["title"] = mapping_title(name, rule)
             timeline["entries"].append(entry)
             entry_count += 1
 
@@ -517,6 +562,7 @@ def build_xlsx_schedule(
         max_week,
         break_limit_minutes,
     )
+    day_list = apply_break_rules(day_list, rules)
     day_list = merge_day_timelines(day_list, max_week, "chaoxing-timeline")
     entry_count = sum(len(timeline.get("entries") or []) for timeline in day_list)
     schedule = {

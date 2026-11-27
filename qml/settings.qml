@@ -9,6 +9,157 @@ FluentPage {
     property string pluginId: "com.msyark.chaoxingsync"
     property var backend: PluginBackendBridge.get_backend(pluginId)
     property bool ready: false
+    property var mappingRules: []
+    property int editingIndex: -1
+    property var editingRule: ({
+        "name": "",
+        "target": "both",
+        "start": "",
+        "end": "",
+        "title": "",
+        "exclude": false
+    })
+
+    function blankMapping() {
+        return {
+            name: "",
+            target: "both",
+            start: "",
+            end: "",
+            title: "",
+            exclude: false
+        }
+    }
+
+    function cloneMapping(rule) {
+        var source = rule || {}
+        return {
+            name: String(source.name || ""),
+            target: ["course", "timeline", "both"].indexOf(source.target) >= 0 ? source.target : "both",
+            start: String(source.start || ""),
+            end: String(source.end || ""),
+            title: String(source.title || ""),
+            exclude: !!source.exclude
+        }
+    }
+
+    function parseMappings(text) {
+        try {
+            var data = JSON.parse(text || "[]")
+            if (!Array.isArray(data)) {
+                return []
+            }
+            var result = []
+            for (var i = 0; i < data.length; i++) {
+                result.push(cloneMapping(data[i]))
+            }
+            return result
+        } catch (error) {
+            return []
+        }
+    }
+
+    function mappingTargetIndex(target) {
+        return target === "course" ? 0 : target === "timeline" ? 1 : 2
+    }
+
+    function mappingTargetValue(index) {
+        return index === 0 ? "course" : index === 1 ? "timeline" : "both"
+    }
+
+    function mappingSummary(rule) {
+        var parts = []
+        parts.push(rule.target === "course" ? "课程" : rule.target === "timeline" ? "时间线" : "课程 + 时间线")
+        if (rule.exclude) {
+            parts.push("不写入课表")
+        } else {
+            if (rule.start || rule.end) {
+                parts.push((rule.start || "…") + "–" + (rule.end || "…"))
+            }
+            if (rule.title) {
+                parts.push("写入为「" + rule.title + "」")
+            }
+            if (!rule.start && !rule.end && !rule.title) {
+                parts.push("沿用同步数据")
+            }
+        }
+        return parts.join(" · ")
+    }
+
+    function saveMappings() {
+        if (backend) {
+            backend.setScheduleMappings(JSON.stringify(mappingRules))
+        }
+    }
+
+    function removeMapping(index) {
+        if (index < 0 || index >= mappingRules.length) {
+            return
+        }
+        var next = mappingRules.slice()
+        next.splice(index, 1)
+        mappingRules = next
+        saveMappings()
+    }
+
+    function openMapping(index) {
+        if (index >= 0) {
+            if (index >= mappingRules.length) {
+                return
+            }
+            editingIndex = index
+            editingRule = cloneMapping(mappingRules[index])
+        } else {
+            editingIndex = -1
+            editingRule = blankMapping()
+        }
+        mappingDialog.open()
+    }
+
+    function editMapping(index) {
+        openMapping(index)
+    }
+
+    function addMapping() {
+        openMapping(-1)
+    }
+
+    function resetMappingEditor() {
+        editingIndex = -1
+        editingRule = blankMapping()
+    }
+
+    function updateDialogButtons() {
+        var okButton = mappingDialog.standardButton(Dialog.Ok)
+        if (okButton) {
+            okButton.enabled = String(ruleNameField.text || "").trim().length > 0
+        }
+    }
+
+    function commitMapping() {
+        var name = String(ruleNameField.text || "").trim()
+        if (name.length === 0) {
+            return
+        }
+        var excluded = ruleExcludeSwitch.checked
+        var rule = {
+            name: name,
+            target: mappingTargetValue(ruleTargetBox.currentIndex),
+            start: excluded ? "" : startField.value,
+            end: excluded ? "" : endField.value,
+            title: excluded ? "" : String(ruleTitleField.text || "").trim(),
+            exclude: excluded
+        }
+        var next = mappingRules.slice()
+        if (editingIndex >= 0 && editingIndex < next.length) {
+            next[editingIndex] = rule
+        } else {
+            next.push(rule)
+        }
+        mappingRules = next
+        saveMappings()
+        editingIndex = -1
+    }
 
     function refresh() {
         if (!backend) {
@@ -24,8 +175,7 @@ FluentPage {
         timetableUrlField.text = backend.timetableUrl
         timelineServerUrlField.text = backend.timelineServerUrl
         deviceSnField.text = backend.deviceSn
-        excludeCoursesField.text = backend.excludeCourses
-        excludeTimelineField.text = backend.excludeTimeline
+        mappingRules = parseMappings(backend.scheduleMappings)
         notifyStartupSwitch.checked = backend.notifyStartup
         notifyScheduledSwitch.checked = backend.notifyScheduled
         notifyManualSwitch.checked = backend.notifyManual
@@ -532,40 +682,113 @@ FluentPage {
         SettingExpander {
             Layout.fillWidth: true
             expanded: false
-            icon.name: "ic_fluent_filter_dismiss_20_regular"
-            title: "排除项"
-            description: "按名称去除不需要的课程或时间线节次；多个名称用逗号分隔"
+            icon.name: "ic_fluent_arrow_shuffle_20_regular"
+            title: "日程映射"
+            description: "按名称改写课程或时间线的名称、时间，也可以设为不写入课表"
 
-            SettingItem {
-                title: "排除课程"
-                description: "课程名称包含这些关键词时不同步"
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                Layout.topMargin: 10
+                Layout.bottomMargin: 14
+                spacing: 10
 
-                TextField {
-                    id: excludeCoursesField
-                    Layout.preferredWidth: 250
-                    placeholderText: "例如：班会, 自习"
-                    selectByMouse: true
-                    onEditingFinished: {
-                        if (backend) {
-                            backend.setExcludeCourses(text)
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 0
+
+                    Repeater {
+                        model: page.mappingRules
+
+                        delegate: ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 0
+
+                            Frame {
+                                Layout.fillWidth: true
+                                hoverable: false
+                                radius: 0
+                                color: "transparent"
+                                border.color: "transparent"
+                                leftPadding: 4
+                                rightPadding: 4
+                                topPadding: 10
+                                bottomPadding: 10
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    spacing: 10
+
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.name.length > 0 ? modelData.name : "未命名规则"
+                                            typography: Typography.Body
+                                            elide: Text.ElideRight
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: page.mappingSummary(modelData)
+                                            typography: Typography.Caption
+                                            color: Theme.currentTheme.colors.textSecondaryColor
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+
+                                    ToolButton {
+                                        icon.name: "ic_fluent_edit_20_regular"
+                                        onClicked: page.editMapping(index)
+                                    }
+
+                                    ToolButton {
+                                        icon.name: "ic_fluent_delete_20_regular"
+                                        onClicked: page.removeMapping(index)
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.leftMargin: 4
+                                Layout.rightMargin: 4
+                                height: 1
+                                color: Theme.currentTheme.colors.dividerBorderColor
+                                visible: index < page.mappingRules.length - 1
+                            }
                         }
                     }
                 }
-            }
 
-            SettingItem {
-                title: "排除时间线"
-                description: "节次名称包含这些关键词时不写入时间线"
+                Text {
+                    Layout.fillWidth: true
+                    visible: page.mappingRules.length === 0
+                    typography: Typography.Caption
+                    color: Theme.currentTheme.colors.textSecondaryColor
+                    wrapMode: Text.Wrap
+                    text: "暂无映射规则；添加后可改写或排除匹配的课程/时间线。"
+                }
 
-                TextField {
-                    id: excludeTimelineField
-                    Layout.preferredWidth: 250
-                    placeholderText: "例如：午休, 晚自习"
-                    selectByMouse: true
-                    onEditingFinished: {
-                        if (backend) {
-                            backend.setExcludeTimeline(text)
-                        }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    Button {
+                        text: "添加规则"
+                        icon.name: "ic_fluent_add_20_regular"
+                        onClicked: page.addMapping()
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        typography: Typography.Caption
+                        color: Theme.currentTheme.colors.textSecondaryColor
+                        wrapMode: Text.Wrap
+                        text: "名称包含匹配，自上而下取第一条；时间或名称留空时沿用同步数据。"
                     }
                 }
             }
@@ -700,6 +923,231 @@ FluentPage {
                     onLinkActivated: function(link) {
                         Qt.openUrlExternally(link)
                     }
+                }
+            }
+        }
+    }
+
+    component MappingTimePicker: RowLayout {
+        id: timeField
+        property string value: ""
+        spacing: 4
+
+        Loader {
+            id: pickerLoader
+            property string pendingValue: ""
+            Layout.preferredWidth: 150
+            Layout.preferredHeight: 32
+            sourceComponent: Component {
+                TimePicker {
+                    implicitWidth: 150
+                    implicitHeight: 32
+                    use24Hour: true
+                    hourText: "时"
+                    minuteText: "分"
+                    contentItem: Text {
+                        anchors.fill: parent
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        text: time !== "" ? time : "选择时间"
+                        color: time !== ""
+                            ? Theme.currentTheme.colors.textColor
+                            : Theme.currentTheme.colors.textSecondaryColor
+                    }
+                    onTimeChanged: {
+                        if (time !== "") {
+                            timeField.value = time
+                        }
+                    }
+                }
+            }
+            onLoaded: {
+                if (pendingValue) {
+                    item.setTime(pendingValue)
+                }
+            }
+        }
+
+        ToolButton {
+            visible: timeField.value !== ""
+            icon.name: "ic_fluent_dismiss_20_regular"
+            onClicked: timeField.clear()
+        }
+
+        function setValue(text) {
+            var time = String(text || "")
+            value = /^\d{2}:\d{2}$/.test(time) ? time : ""
+            pickerLoader.pendingValue = value
+            pickerLoader.active = false
+            Qt.callLater(function() {
+                pickerLoader.active = true
+            })
+        }
+
+        function clear() {
+            setValue("")
+        }
+    }
+
+    Dialog {
+        id: mappingDialog
+        title: page.editingIndex >= 0 ? "编辑映射规则" : "添加映射规则"
+        modal: true
+        width: 480
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        closePolicy: Popup.NoAutoClose
+
+        onOpened: {
+            ruleNameField.text = page.editingRule.name
+            ruleTargetBox.currentIndex = page.mappingTargetIndex(page.editingRule.target)
+            ruleExcludeSwitch.checked = page.editingRule.exclude
+            startField.setValue(page.editingRule.start)
+            endField.setValue(page.editingRule.end)
+            ruleTitleField.text = page.editingRule.title
+
+            var okButton = mappingDialog.standardButton(Dialog.Ok)
+            if (okButton) {
+                okButton.text = "保存"
+            }
+            var cancelButton = mappingDialog.standardButton(Dialog.Cancel)
+            if (cancelButton) {
+                cancelButton.text = "取消"
+            }
+            page.updateDialogButtons()
+            ruleNameField.forceActiveFocus()
+        }
+
+        onAccepted: page.commitMapping()
+        onRejected: page.resetMappingEditor()
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 14
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 4
+
+                Text {
+                    text: "名称"
+                    typography: Typography.Caption
+                    color: Theme.currentTheme.colors.textSecondaryColor
+                }
+
+                TextField {
+                    id: ruleNameField
+                    Layout.fillWidth: true
+                    placeholderText: "课程或时间线名称，按包含匹配"
+                    selectByMouse: true
+                    onTextChanged: page.updateDialogButtons()
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 4
+
+                Text {
+                    text: "匹配范围"
+                    typography: Typography.Caption
+                    color: Theme.currentTheme.colors.textSecondaryColor
+                }
+
+                ComboBox {
+                    id: ruleTargetBox
+                    Layout.fillWidth: true
+                    model: ["课程", "时间线", "同时匹配"]
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 12
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+
+                    Text {
+                        text: "不写入课表"
+                        typography: Typography.Body
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: "开启后跳过匹配项，时间与名称设置不再生效"
+                        typography: Typography.Caption
+                        color: Theme.currentTheme.colors.textSecondaryColor
+                        wrapMode: Text.Wrap
+                    }
+                }
+
+                Switch {
+                    id: ruleExcludeSwitch
+                    checkedText: ""
+                    uncheckedText: ""
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 10
+                visible: !ruleExcludeSwitch.checked
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    Text {
+                        Layout.preferredWidth: 64
+                        text: "开始时间"
+                        typography: Typography.Body
+                    }
+
+                    MappingTimePicker {
+                        id: startField
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    Text {
+                        Layout.preferredWidth: 64
+                        text: "结束时间"
+                        typography: Typography.Body
+                    }
+
+                    MappingTimePicker {
+                        id: endField
+                    }
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    Text {
+                        text: "写入名称"
+                        typography: Typography.Caption
+                        color: Theme.currentTheme.colors.textSecondaryColor
+                    }
+
+                    TextField {
+                        id: ruleTitleField
+                        Layout.fillWidth: true
+                        placeholderText: "留空沿用同步名称"
+                        selectByMouse: true
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "时间未设置时沿用同步数据；名称按包含匹配，规则自上而下取第一条。"
+                    typography: Typography.Caption
+                    color: Theme.currentTheme.colors.textSecondaryColor
+                    wrapMode: Text.Wrap
                 }
             }
         }

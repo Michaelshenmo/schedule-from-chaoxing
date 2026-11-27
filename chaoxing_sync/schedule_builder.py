@@ -5,6 +5,14 @@ from datetime import date, datetime, timedelta
 
 from .breaks import fill_breaks, merge_day_timelines
 from .filters import filter_timeline_slots, is_excluded, split_names
+from .mappings import (
+    apply_break_rules,
+    apply_clock_override,
+    apply_timeline_rules,
+    match_rule,
+    mapping_title,
+    normalize_rules,
+)
 from .xlsx_timetable import (
     _server_activity_slots,
     _server_period_excluded,
@@ -247,6 +255,7 @@ def build_schedule(
     exclude_courses: str = "",
     exclude_timeline: str = "",
     break_limit_minutes: int = 45,
+    mappings=None,
 ):
     curriculum = data.get("curriculum") or {}
     lessons = data.get("lessons") or []
@@ -254,9 +263,11 @@ def build_schedule(
     if not isinstance(curriculum, dict) or not isinstance(lessons, list) or not isinstance(courses, list):
         raise ScheduleBuildError("课表数据格式异常")
     times = parse_time_config(_extract_time_values(curriculum))
+    rules = normalize_rules(mappings)
     server_timeline = server_timeline if isinstance(server_timeline, dict) else {}
     course_exclusions = split_names(exclude_courses)
     server_timeline = filter_timeline_slots(server_timeline, split_names(exclude_timeline))
+    server_timeline = apply_timeline_rules(server_timeline, rules)
     fill_timeline = bool(sync_timeline and allow_course_timeline)
 
     subjects = {}
@@ -304,14 +315,23 @@ def build_schedule(
             timelines[key] = timeline
         return timeline
 
+    def rename_subject(subject_id: str, title: str):
+        subject = subjects.get(subject_id)
+        if subject is not None and title:
+            subject["name"] = title
+            subject["simplifiedName"] = _simplified_name(title)
+
     if sync_courses:
         for course in courses:
             if not isinstance(course, dict):
                 continue
             name = str(course.get("name") or "").strip()
-            if not name or is_excluded(name, course_exclusions):
+            rule = match_rule(name, rules, "course")
+            if not name or is_excluded(name, course_exclusions) or (rule and rule.get("exclude")):
                 continue
-            ensure_subject(name, str(course.get("teacher") or "").strip(), "")
+            subject_id = ensure_subject(name, str(course.get("teacher") or "").strip(), "")
+            if rule:
+                rename_subject(subject_id, rule.get("title"))
 
     for lesson in lessons:
         if not isinstance(lesson, dict):
@@ -326,12 +346,15 @@ def build_schedule(
         if not name:
             skipped += 1
             continue
-        if is_excluded(name, course_exclusions):
+        rule = match_rule(name, rules, "course")
+        if is_excluded(name, course_exclusions) or (rule and rule.get("exclude")):
             skipped += 1
             continue
         teacher = str(lesson.get("teacherName") or lesson.get("teacher") or "").strip()
         location = str(lesson.get("location") or lesson.get("classroom") or "").strip()
         subject_id = ensure_subject(name, teacher, location) if sync_courses else ""
+        if rule:
+            rename_subject(subject_id, rule.get("title"))
         if not fill_timeline:
             continue
         try:
@@ -369,10 +392,13 @@ def build_schedule(
                     entry_type = "activity"
         else:
             lesson_times = _lesson_times(lesson, times)
+        if lesson_times is None and rule and rule.get("start") and rule.get("end"):
+            if rule["start"] < rule["end"]:
+                lesson_times = (rule["start"], rule["end"])
         if not (1 <= day <= 7) or not weeks or not lesson_times:
             skipped += 1
             continue
-        start, finish = lesson_times
+        start, finish = apply_clock_override(lesson_times[0], lesson_times[1], rule)
         entry_id = _stable_id("cxe", day, start, finish, subject_id or name, entry_type)
         timeline = timeline_for(day, weeks)
         entry = {
@@ -384,7 +410,7 @@ def build_schedule(
         if entry_type == "class":
             entry["subjectId"] = subject_id
         else:
-            entry["title"] = name
+            entry["title"] = mapping_title(name, rule)
         if entry_id in timeline["_ids"]:
             continue
         timeline["_ids"].add(entry_id)
@@ -423,6 +449,7 @@ def build_schedule(
     )
     max_week = int(data.get("max_week") or 0)
     day_list = fill_breaks(day_list, max_week, break_limit_minutes)
+    day_list = apply_break_rules(day_list, rules)
     day_list = merge_day_timelines(day_list, max_week, "cxd")
     entry_count = sum(len(timeline.get("entries") or []) for timeline in day_list)
     uuid = str(curriculum.get("uuid") or "").strip()

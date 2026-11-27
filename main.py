@@ -24,6 +24,8 @@ except ImportError:
 
 from chaoxing_sync.client import ChaoxingClient, ChaoxingError
 from chaoxing_sync.credentials import protect_account, unprotect_account
+from chaoxing_sync.filters import split_names
+from chaoxing_sync.mappings import dump_rules, normalize_rules
 from chaoxing_sync.schedule_builder import build_schedule
 from chaoxing_sync.admin_device import fetch_admin_timeline
 from chaoxing_sync.timeline_server import fetch_timeline
@@ -49,6 +51,7 @@ class PluginConfig(ConfigBaseModel):
     device_sn: str = ""
     exclude_courses: str = ""
     exclude_timeline: str = ""
+    schedule_mappings: str = ""
     break_limit_minutes: int = 45
     last_sync_at: str = ""
     notify_startup: bool = True
@@ -105,6 +108,7 @@ class SyncThread(QThread):
         exclude_timeline: str = "",
         break_limit_minutes: int = 45,
         existing_schedule=None,
+        mappings: str = "",
     ):
         super().__init__()
         self._encrypted_account = encrypted_account
@@ -119,6 +123,7 @@ class SyncThread(QThread):
         self._exclude_timeline = exclude_timeline
         self._break_limit_minutes = break_limit_minutes
         self._existing_schedule = existing_schedule or {}
+        self._mappings = mappings
         self.details = []
 
     def _detail(self, message: str):
@@ -162,6 +167,9 @@ class SyncThread(QThread):
             self._detail(f"排除课程：{self._exclude_courses.strip()}")
         if self._exclude_timeline.strip():
             self._detail(f"排除时间线：{self._exclude_timeline.strip()}")
+        mapping_count = len([rule for rule in normalize_rules(self._mappings) if rule.get("name")])
+        if mapping_count:
+            self._detail(f"日程映射：{mapping_count} 条")
         self._detail(f"课间上限：{'不限制' if self._break_limit_minutes < 0 else str(self._break_limit_minutes) + ' 分钟'}")
         try:
             if not self._sync_timeline:
@@ -207,6 +215,7 @@ class SyncThread(QThread):
                     exclude_courses=self._exclude_courses,
                     exclude_timeline=self._exclude_timeline,
                     break_limit_minutes=self._break_limit_minutes,
+                    mappings=self._mappings,
                 )
                 info["synced_at"] = datetime.now().isoformat(timespec="seconds")
                 info["timeline_error"] = timeline_error
@@ -258,6 +267,7 @@ class SyncThread(QThread):
                 exclude_courses=self._exclude_courses,
                 exclude_timeline=self._exclude_timeline,
                 break_limit_minutes=self._break_limit_minutes,
+                mappings=self._mappings,
             )
             info["synced_at"] = datetime.now().isoformat(timespec="seconds")
             info["timeline_error"] = timeline_error
@@ -347,6 +357,7 @@ class Plugin(CW2Plugin):
         super().on_load()
         self.api.config.register_plugin_model(self.pid, self.config)
         self._show_timetable_export = self._load_show_timetable_export()
+        self._migrate_exclusions_to_mappings()
         if self.credentialsConfigured:
             self._account_message = "已保存加密账号"
         icon = self.PATH / "icon.png"
@@ -435,6 +446,10 @@ class Plugin(CW2Plugin):
     @Property(str, notify=configChanged)
     def excludeTimeline(self) -> str:
         return str(self.config.exclude_timeline or "")
+
+    @Property(str, notify=configChanged)
+    def scheduleMappings(self) -> str:
+        return str(self.config.schedule_mappings or "")
 
     @Property(int, notify=configChanged)
     def breakLimitMinutes(self) -> int:
@@ -639,6 +654,17 @@ class Plugin(CW2Plugin):
         self._save_config()
         self.configChanged.emit()
 
+    @Slot(str)
+    def setScheduleMappings(self, value: str):
+        try:
+            data = json.loads(value or "[]")
+        except ValueError:
+            return
+        if not isinstance(data, list):
+            return
+        self.config.schedule_mappings = dump_rules(normalize_rules(data))
+        self._save_config()
+
     @Slot(int)
     def setBreakLimitMinutes(self, minutes: int):
         value = max(-1, min(int(minutes), 1440))
@@ -699,6 +725,35 @@ class Plugin(CW2Plugin):
         if not isinstance(data, dict):
             return DEFAULT_SHOW_TIMETABLE_EXPORT
         return _coerce_bool(data.get("show_timetable_export"), DEFAULT_SHOW_TIMETABLE_EXPORT)
+
+    def _migrate_exclusions_to_mappings(self):
+        migrated = []
+        for name in split_names(self.config.exclude_courses):
+            migrated.append({
+                "name": name,
+                "target": "course",
+                "start": "",
+                "end": "",
+                "title": "",
+                "exclude": True,
+            })
+        for name in split_names(self.config.exclude_timeline):
+            migrated.append({
+                "name": name,
+                "target": "timeline",
+                "start": "",
+                "end": "",
+                "title": "",
+                "exclude": True,
+            })
+        if not migrated:
+            return
+        rules = [rule for rule in normalize_rules(self.config.schedule_mappings) if rule.get("name")]
+        self.config.schedule_mappings = dump_rules(normalize_rules(migrated + rules))
+        self.config.exclude_courses = ""
+        self.config.exclude_timeline = ""
+        self._save_config()
+        logger.info(f"Migrated {len(migrated)} exclusion rule(s) to schedule mappings")
 
     @Slot(result=bool)
     def reloadUiConfig(self) -> bool:
@@ -789,6 +844,7 @@ class Plugin(CW2Plugin):
             str(self.config.exclude_timeline or ""),
             int(self.config.break_limit_minutes),
             existing_schedule,
+            str(self.config.schedule_mappings or ""),
         )
         thread.succeeded.connect(self._on_sync_success)
         thread.failed.connect(self._on_sync_failed)
