@@ -32,7 +32,12 @@ FluentPage {
         ready = true
     }
 
-    Component.onCompleted: refresh()
+    Component.onCompleted: {
+        if (backend) {
+            backend.reloadUiConfig()
+        }
+        refresh()
+    }
     Component.onDestruction: {
         if (phoneField) {
             phoneField.text = ""
@@ -42,6 +47,9 @@ FluentPage {
         }
     }
     onVisibleChanged: {
+        if (visible && backend) {
+            backend.reloadUiConfig()
+        }
         if (!visible) {
             if (phoneField) {
                 phoneField.text = ""
@@ -314,8 +322,9 @@ FluentPage {
         SettingExpander {
             Layout.fillWidth: true
             expanded: false
+            visible: backend ? backend.showTimetableExport : false
             icon.name: "ic_fluent_document_table_20_regular"
-            title: "课表导出文件（可选）"
+            title: "课表导出文件"
             description: "可选择本地 .xlsx 课表，或填写学校提供的课表文件下载地址"
 
             SettingItem {

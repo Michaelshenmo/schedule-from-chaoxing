@@ -33,6 +33,8 @@ from chaoxing_sync.xlsx_timetable import build_xlsx_schedule, parse_timetable_xl
 ACTIVE_THREADS = set()
 DEFAULT_SCHEDULE_NAME = "超星学习通"
 AUTO_TIMELINE_PREFIXES = ("chaoxing-timeline-", "cxd-")
+UI_CONFIG_NAME = "config.json"
+DEFAULT_SHOW_TIMETABLE_EXPORT = False
 
 
 class PluginConfig(ConfigBaseModel):
@@ -294,6 +296,19 @@ class SyncThread(QThread):
                     pass
 
 
+def _coerce_bool(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on", "show", "shown", "visible", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "hide", "hidden", "disabled"}:
+        return False
+    return default
+
+
 def _sanitize_schedule_name(name: str) -> str:
     value = str(name or "").strip()
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
@@ -326,10 +341,12 @@ class Plugin(CW2Plugin):
         self._account_message = ""
         self._account_error = False
         self._current_interval = 0
+        self._show_timetable_export = DEFAULT_SHOW_TIMETABLE_EXPORT
 
     def on_load(self):
         super().on_load()
         self.api.config.register_plugin_model(self.pid, self.config)
+        self._show_timetable_export = self._load_show_timetable_export()
         if self.credentialsConfigured:
             self._account_message = "已保存加密账号"
         icon = self.PATH / "icon.png"
@@ -398,6 +415,10 @@ class Plugin(CW2Plugin):
     @Property(str, notify=configChanged)
     def timetableUrl(self) -> str:
         return str(self.config.timetable_url or "")
+
+    @Property(bool, notify=configChanged)
+    def showTimetableExport(self) -> bool:
+        return bool(self._show_timetable_export)
 
     @Property(str, notify=configChanged)
     def timelineServerUrl(self) -> str:
@@ -668,6 +689,24 @@ class Plugin(CW2Plugin):
             self.api.config.save()
         except Exception as error:
             logger.warning(f"Failed to save plugin config: {error}")
+
+    def _load_show_timetable_export(self) -> bool:
+        path = self.PATH / UI_CONFIG_NAME
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return DEFAULT_SHOW_TIMETABLE_EXPORT
+        if not isinstance(data, dict):
+            return DEFAULT_SHOW_TIMETABLE_EXPORT
+        return _coerce_bool(data.get("show_timetable_export"), DEFAULT_SHOW_TIMETABLE_EXPORT)
+
+    @Slot(result=bool)
+    def reloadUiConfig(self) -> bool:
+        value = self._load_show_timetable_export()
+        if value != self._show_timetable_export:
+            self._show_timetable_export = value
+            self.configChanged.emit()
+        return value
 
     def _auto_sync_status(self):
         if not (self.config.sync_courses or self.config.sync_timeline):
