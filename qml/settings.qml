@@ -532,7 +532,7 @@ FluentPage {
         SettingExpander {
             Layout.fillWidth: true
             expanded: false
-            icon.name: "ic_fluent_filter_20_regular"
+            icon.name: "ic_fluent_filter_dismiss_20_regular"
             title: "排除项"
             description: "按名称去除不需要的课程或时间线节次；多个名称用逗号分隔"
 
