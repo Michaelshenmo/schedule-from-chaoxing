@@ -14,16 +14,66 @@ FluentPage {
     property var editingRule: ({
         "name": "",
         "target": "both",
+        "weeks": [],
         "start": "",
         "end": "",
         "title": "",
         "exclude": false
     })
+    property string editingTarget: "both"
+    property var editingWeeks: []
+    property var editingWeekdays: []
+    property int editingWeekCount: 20
+
+    readonly property int maxWeek: {
+        if (!backend) {
+            return 20
+        }
+        var value = Number(backend.maxWeek)
+        if (!isFinite(value) || value < 1) {
+            return 20
+        }
+        return Math.max(1, Math.min(60, Math.floor(value)))
+    }
+
+    function normalizeWeeks(value) {
+        var result = []
+        if (!value || typeof value.length !== "number") {
+            return result
+        }
+        for (var i = 0; i < value.length; i++) {
+            var number = parseInt(value[i])
+            if (!isNaN(number) && number >= 1 && result.indexOf(number) < 0) {
+                result.push(number)
+            }
+        }
+        return result.sort(function(a, b) {
+            return a - b
+        })
+    }
+
+    function normalizeWeekdays(value) {
+        var result = []
+        if (!value || typeof value.length !== "number") {
+            return result
+        }
+        for (var i = 0; i < value.length; i++) {
+            var number = parseInt(value[i])
+            if (!isNaN(number) && number >= 1 && number <= 7 && result.indexOf(number) < 0) {
+                result.push(number)
+            }
+        }
+        return result.sort(function(a, b) {
+            return a - b
+        })
+    }
 
     function blankMapping() {
         return {
             name: "",
             target: "both",
+            weekdays: [],
+            weeks: [],
             start: "",
             end: "",
             title: "",
@@ -36,6 +86,8 @@ FluentPage {
         return {
             name: String(source.name || ""),
             target: ["course", "timeline", "both"].indexOf(source.target) >= 0 ? source.target : "both",
+            weekdays: normalizeWeekdays(source.weekdays),
+            weeks: normalizeWeeks(source.weeks),
             start: String(source.start || ""),
             end: String(source.end || ""),
             title: String(source.title || ""),
@@ -46,7 +98,7 @@ FluentPage {
     function parseMappings(text) {
         try {
             var data = JSON.parse(text || "[]")
-            if (!Array.isArray(data)) {
+            if (!data || typeof data.length !== "number") {
                 return []
             }
             var result = []
@@ -59,17 +111,60 @@ FluentPage {
         }
     }
 
-    function mappingTargetIndex(target) {
-        return target === "course" ? 0 : target === "timeline" ? 1 : 2
+    function weekdayText(days) {
+        var sorted = normalizeWeekdays(days)
+        if (sorted.length === 0) {
+            return "每天"
+        }
+        var names = ["", "周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        var parts = []
+        var start = sorted[0]
+        var previous = sorted[0]
+        for (var i = 1; i <= sorted.length; i++) {
+            var current = sorted[i]
+            if (current === previous + 1) {
+                previous = current
+                continue
+            }
+            parts.push(previous === start
+                ? names[start]
+                : names[start] + "至" + names[previous])
+            start = current
+            previous = current
+        }
+        return parts.join("、")
     }
 
-    function mappingTargetValue(index) {
-        return index === 0 ? "course" : index === 1 ? "timeline" : "both"
+    function weekRangeText(weeks) {
+        var sorted = normalizeWeeks(weeks)
+        if (sorted.length === 0) {
+            return "全周"
+        }
+        var parts = []
+        var start = sorted[0]
+        var previous = sorted[0]
+        for (var i = 1; i <= sorted.length; i++) {
+            var current = sorted[i]
+            if (current === previous + 1) {
+                previous = current
+                continue
+            }
+            parts.push(previous === start ? String(start) : start + "-" + previous)
+            start = current
+            previous = current
+        }
+        return "第" + parts.join(",") + "周"
     }
 
     function mappingSummary(rule) {
         var parts = []
         parts.push(rule.target === "course" ? "课程" : rule.target === "timeline" ? "时间线" : "课程 + 时间线")
+        if (rule.weekdays && rule.weekdays.length) {
+            parts.push(weekdayText(rule.weekdays))
+        }
+        if (rule.weeks && rule.weeks.length) {
+            parts.push(weekRangeText(rule.weeks))
+        }
         if (rule.exclude) {
             parts.push("不写入课表")
         } else {
@@ -84,6 +179,74 @@ FluentPage {
             }
         }
         return parts.join(" · ")
+    }
+
+    function weekSelected(week) {
+        return editingWeeks.indexOf(parseInt(week)) >= 0
+    }
+
+    function toggleWeek(week) {
+        var number = parseInt(week)
+        if (isNaN(number)) {
+            return
+        }
+        var next = editingWeeks.slice()
+        var index = next.indexOf(number)
+        if (index >= 0) {
+            next.splice(index, 1)
+        } else {
+            next.push(number)
+        }
+        editingWeeks = next.sort(function(a, b) {
+            return a - b
+        })
+        updateDialogButtons()
+    }
+
+    function selectAllWeeks() {
+        var next = []
+        for (var week = 1; week <= editingWeekCount; week++) {
+            next.push(week)
+        }
+        editingWeeks = next
+        updateDialogButtons()
+    }
+
+    function clearWeeks() {
+        editingWeeks = []
+        updateDialogButtons()
+    }
+
+    function weekdaySelected(day) {
+        return editingWeekdays.indexOf(parseInt(day)) >= 0
+    }
+
+    function toggleWeekday(day) {
+        var number = parseInt(day)
+        if (isNaN(number) || number < 1 || number > 7) {
+            return
+        }
+        var next = editingWeekdays.slice()
+        var index = next.indexOf(number)
+        if (index >= 0) {
+            next.splice(index, 1)
+        } else {
+            next.push(number)
+        }
+        editingWeekdays = next.sort(function(a, b) {
+            return a - b
+        })
+        updateDialogButtons()
+    }
+
+    function selectAllWeekdays() {
+        editingWeekdays = [1, 2, 3, 4, 5, 6, 7]
+        updateDialogButtons()
+    }
+
+    function clearWeekdays() {
+        editingWeekdays = []
+        updateDialogButtons()
     }
 
     function saveMappings() {
@@ -113,6 +276,24 @@ FluentPage {
             editingIndex = -1
             editingRule = blankMapping()
         }
+        editingTarget = editingRule.target
+        var savedDays = normalizeWeekdays(editingRule.weekdays)
+        editingWeekdays = savedDays.length > 0 ? savedDays : [1, 2, 3, 4, 5, 6, 7]
+        var selected = []
+        var count = page.maxWeek
+        var savedWeeks = normalizeWeeks(editingRule.weeks)
+        if (savedWeeks.length > 0) {
+            selected = savedWeeks.slice()
+            for (var i = 0; i < savedWeeks.length; i++) {
+                count = Math.max(count, savedWeeks[i])
+            }
+        } else {
+            for (var week = 1; week <= count; week++) {
+                selected.push(week)
+            }
+        }
+        editingWeeks = selected
+        editingWeekCount = count
         mappingDialog.open()
     }
 
@@ -127,12 +308,18 @@ FluentPage {
     function resetMappingEditor() {
         editingIndex = -1
         editingRule = blankMapping()
+        editingTarget = "both"
+        editingWeeks = []
+        editingWeekdays = []
+        editingWeekCount = page.maxWeek
     }
 
     function updateDialogButtons() {
         var okButton = mappingDialog.standardButton(Dialog.Ok)
         if (okButton) {
             okButton.enabled = String(ruleNameField.text || "").trim().length > 0
+                && editingWeeks.length > 0
+                && editingWeekdays.length > 0
         }
     }
 
@@ -141,10 +328,26 @@ FluentPage {
         if (name.length === 0) {
             return
         }
+        var weekdays = normalizeWeekdays(editingWeekdays)
+        if (weekdays.length === 0) {
+            return
+        }
+        if (weekdays.length === 7) {
+            weekdays = []
+        }
+        var weeks = normalizeWeeks(editingWeeks)
+        if (weeks.length === 0) {
+            return
+        }
+        if (weeks.length === editingWeekCount) {
+            weeks = []
+        }
         var excluded = ruleExcludeSwitch.checked
         var rule = {
             name: name,
-            target: mappingTargetValue(ruleTargetBox.currentIndex),
+            target: editingTarget,
+            weekdays: weekdays,
+            weeks: weeks,
             start: excluded ? "" : startField.value,
             end: excluded ? "" : endField.value,
             title: excluded ? "" : String(ruleTitleField.text || "").trim(),
@@ -684,7 +887,7 @@ FluentPage {
             expanded: false
             icon.name: "ic_fluent_arrow_shuffle_20_regular"
             title: "日程映射"
-            description: "按名称改写课程或时间线的名称、时间，也可以设为不写入课表"
+            description: "按名称、星期和周次改写课程或时间线的名称、时间，也可以设为不写入课表"
 
             ColumnLayout {
                 Layout.fillWidth: true
@@ -788,7 +991,7 @@ FluentPage {
                         typography: Typography.Caption
                         color: Theme.currentTheme.colors.textSecondaryColor
                         wrapMode: Text.Wrap
-                        text: "名称包含匹配，自上而下取第一条；时间或名称留空时沿用同步数据。"
+                        text: "名称包含匹配，自上而下取第一条；仅选定星期和周次生效，时间或名称留空时沿用同步数据。"
                     }
                 }
             }
@@ -998,8 +1201,8 @@ FluentPage {
         closePolicy: Popup.NoAutoClose
 
         onOpened: {
+            dialogTabs.currentIndex = 0
             ruleNameField.text = page.editingRule.name
-            ruleTargetBox.currentIndex = page.mappingTargetIndex(page.editingRule.target)
             ruleExcludeSwitch.checked = page.editingRule.exclude
             startField.setValue(page.editingRule.start)
             endField.setValue(page.editingRule.end)
@@ -1022,132 +1225,343 @@ FluentPage {
 
         ColumnLayout {
             Layout.fillWidth: true
-            spacing: 14
+            spacing: 12
 
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 4
+            Segmented {
+                id: dialogTabs
+                Layout.alignment: Qt.AlignHCenter
 
-                Text {
-                    text: "名称"
-                    typography: Typography.Caption
-                    color: Theme.currentTheme.colors.textSecondaryColor
+                SegmentedItem {
+                    text: "命中规则"
+                    width: 120
                 }
 
-                TextField {
-                    id: ruleNameField
-                    Layout.fillWidth: true
-                    placeholderText: "课程或时间线名称，按包含匹配"
-                    selectByMouse: true
-                    onTextChanged: page.updateDialogButtons()
+                SegmentedItem {
+                    text: "操作"
+                    width: 100
                 }
             }
 
-            ColumnLayout {
+            StackLayout {
                 Layout.fillWidth: true
-                spacing: 4
-
-                Text {
-                    text: "匹配范围"
-                    typography: Typography.Caption
-                    color: Theme.currentTheme.colors.textSecondaryColor
-                }
-
-                ComboBox {
-                    id: ruleTargetBox
-                    Layout.fillWidth: true
-                    model: ["课程", "时间线", "同时匹配"]
-                }
-            }
-
-            RowLayout {
-                Layout.fillWidth: true
-                spacing: 12
+                Layout.preferredHeight: currentItem ? currentItem.implicitHeight : 0
+                currentIndex: dialogTabs.currentIndex
 
                 ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: 2
+                    spacing: 10
 
-                    Text {
-                        text: "不写入课表"
-                        typography: Typography.Body
-                    }
-
-                    Text {
+                    ColumnLayout {
                         Layout.fillWidth: true
-                        text: "开启后跳过匹配项，时间与名称设置不再生效"
-                        typography: Typography.Caption
-                        color: Theme.currentTheme.colors.textSecondaryColor
-                        wrapMode: Text.Wrap
-                    }
-                }
+                        spacing: 4
 
-                Switch {
-                    id: ruleExcludeSwitch
-                    checkedText: ""
-                    uncheckedText: ""
-                }
-            }
+                        Text {
+                            text: "名称"
+                            typography: Typography.Caption
+                            color: Theme.currentTheme.colors.textSecondaryColor
+                        }
 
-            ColumnLayout {
-                Layout.fillWidth: true
-                spacing: 10
-                visible: !ruleExcludeSwitch.checked
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 10
-
-                    Text {
-                        Layout.preferredWidth: 64
-                        text: "开始时间"
-                        typography: Typography.Body
+                        TextField {
+                            id: ruleNameField
+                            Layout.fillWidth: true
+                            placeholderText: "课程或时间线名称，按包含匹配"
+                            selectByMouse: true
+                            onTextChanged: page.updateDialogButtons()
+                        }
                     }
 
-                    MappingTimePicker {
-                        id: startField
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        Text {
+                            text: "匹配范围"
+                            typography: Typography.Caption
+                            color: Theme.currentTheme.colors.textSecondaryColor
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 16
+
+                            RadioButton {
+                                text: "课程"
+                                checked: page.editingTarget === "course"
+                                onClicked: page.editingTarget = "course"
+                            }
+
+                            RadioButton {
+                                text: "时间线"
+                                checked: page.editingTarget === "timeline"
+                                onClicked: page.editingTarget = "timeline"
+                            }
+
+                            RadioButton {
+                                text: "同时匹配"
+                                checked: page.editingTarget === "both"
+                                onClicked: page.editingTarget = "both"
+                            }
+
+                            Item {
+                                Layout.fillWidth: true
+                            }
+                        }
                     }
-                }
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 10
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
 
-                    Text {
-                        Layout.preferredWidth: 64
-                        text: "结束时间"
-                        typography: Typography.Body
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text {
+                                text: "星期"
+                                typography: Typography.Caption
+                                color: Theme.currentTheme.colors.textSecondaryColor
+                            }
+
+                            Text {
+                                text: page.editingWeekdays.length + "/7"
+                                typography: Typography.Caption
+                                color: Theme.currentTheme.colors.textSecondaryColor
+                            }
+
+                            Item {
+                                Layout.fillWidth: true
+                            }
+
+                            Button {
+                                text: "全选"
+                                flat: true
+                                onClicked: page.selectAllWeekdays()
+                            }
+
+                            Button {
+                                text: "清空"
+                                flat: true
+                                onClicked: page.clearWeekdays()
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Repeater {
+                                model: 7
+
+                                delegate: Button {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 32
+                                    text: ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][index]
+                                    checkable: true
+                                    checked: page.weekdaySelected(index + 1)
+                                    highlighted: checked
+                                    onClicked: page.toggleWeekday(index + 1)
+                                }
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "只映射所选星期的课程与时间线；未选中的星期保持原样。"
+                            typography: Typography.Caption
+                            color: Theme.currentTheme.colors.textSecondaryColor
+                            wrapMode: Text.Wrap
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            visible: page.editingWeekdays.length === 0
+                            text: "至少选择一个星期"
+                            typography: Typography.Caption
+                            color: Theme.currentTheme.colors.systemCriticalColor
+                        }
                     }
 
-                    MappingTimePicker {
-                        id: endField
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text {
+                                text: "周次"
+                                typography: Typography.Caption
+                                color: Theme.currentTheme.colors.textSecondaryColor
+                            }
+
+                            Text {
+                                text: page.editingWeeks.length + "/" + page.editingWeekCount
+                                typography: Typography.Caption
+                                color: Theme.currentTheme.colors.textSecondaryColor
+                            }
+
+                            Item {
+                                Layout.fillWidth: true
+                            }
+
+                            Button {
+                                text: "全选"
+                                flat: true
+                                onClicked: page.selectAllWeeks()
+                            }
+
+                            Button {
+                                text: "清空"
+                                flat: true
+                                onClicked: page.clearWeeks()
+                            }
+                        }
+
+                        Flickable {
+                            id: weekFlickable
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Math.min(weekFlow.implicitHeight, 110)
+                            contentWidth: width
+                            contentHeight: weekFlow.implicitHeight
+                            clip: true
+                            boundsBehavior: Flickable.StopAtBounds
+
+                            ScrollBar.vertical: ScrollBar {}
+
+                            Flow {
+                                id: weekFlow
+                                width: weekFlickable.width
+                                spacing: 6
+
+                                Repeater {
+                                    model: page.editingWeekCount
+
+                                    delegate: Button {
+                                        width: 40
+                                        height: 32
+                                        text: String(index + 1)
+                                        checkable: true
+                                        checked: page.weekSelected(index + 1)
+                                        highlighted: checked
+                                        onClicked: page.toggleWeek(index + 1)
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "只映射所选周次内的课程与时间线；未选中的周次保持原样。"
+                            typography: Typography.Caption
+                            color: Theme.currentTheme.colors.textSecondaryColor
+                            wrapMode: Text.Wrap
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            visible: page.editingWeeks.length === 0
+                            text: "至少选择一个周次"
+                            typography: Typography.Caption
+                            color: Theme.currentTheme.colors.systemCriticalColor
+                        }
                     }
                 }
 
                 ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: 4
+                    spacing: 10
 
-                    Text {
-                        text: "写入名称"
-                        typography: Typography.Caption
-                        color: Theme.currentTheme.colors.textSecondaryColor
-                    }
-
-                    TextField {
-                        id: ruleTitleField
+                    RowLayout {
                         Layout.fillWidth: true
-                        placeholderText: "留空沿用同步名称"
-                        selectByMouse: true
-                    }
-                }
+                        spacing: 12
 
-                Text {
-                    Layout.fillWidth: true
-                    text: "时间未设置时沿用同步数据；名称按包含匹配，规则自上而下取第一条。"
-                    typography: Typography.Caption
-                    color: Theme.currentTheme.colors.textSecondaryColor
-                    wrapMode: Text.Wrap
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+
+                            Text {
+                                text: "不写入课表"
+                                typography: Typography.Body
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: "开启后跳过匹配项，时间与名称设置不再生效"
+                                typography: Typography.Caption
+                                color: Theme.currentTheme.colors.textSecondaryColor
+                                wrapMode: Text.Wrap
+                            }
+                        }
+
+                        Switch {
+                            id: ruleExcludeSwitch
+                            checkedText: ""
+                            uncheckedText: ""
+                        }
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 10
+                        visible: !ruleExcludeSwitch.checked
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+
+                            Text {
+                                Layout.preferredWidth: 64
+                                text: "开始时间"
+                                typography: Typography.Body
+                            }
+
+                            MappingTimePicker {
+                                id: startField
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+
+                            Text {
+                                Layout.preferredWidth: 64
+                                text: "结束时间"
+                                typography: Typography.Body
+                            }
+
+                            MappingTimePicker {
+                                id: endField
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Text {
+                                text: "写入名称"
+                                typography: Typography.Caption
+                                color: Theme.currentTheme.colors.textSecondaryColor
+                            }
+
+                            TextField {
+                                id: ruleTitleField
+                                Layout.fillWidth: true
+                                placeholderText: "留空沿用同步名称"
+                                selectByMouse: true
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "时间未设置时沿用同步数据；名称按包含匹配，规则自上而下取第一条。"
+                            typography: Typography.Caption
+                            color: Theme.currentTheme.colors.textSecondaryColor
+                            wrapMode: Text.Wrap
+                        }
+                    }
                 }
             }
         }

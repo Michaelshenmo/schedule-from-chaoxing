@@ -12,6 +12,7 @@ from .mappings import (
     match_rule,
     mapping_title,
     normalize_rules,
+    rule_weeks,
 )
 from .xlsx_timetable import (
     _server_activity_slots,
@@ -264,10 +265,23 @@ def build_schedule(
         raise ScheduleBuildError("课表数据格式异常")
     times = parse_time_config(_extract_time_values(curriculum))
     rules = normalize_rules(mappings)
+    max_week = max(1, int(data.get("max_week") or 0))
     server_timeline = server_timeline if isinstance(server_timeline, dict) else {}
     course_exclusions = split_names(exclude_courses)
-    server_timeline = filter_timeline_slots(server_timeline, split_names(exclude_timeline))
-    server_timeline = apply_timeline_rules(server_timeline, rules)
+    raw_timeline = filter_timeline_slots(server_timeline, split_names(exclude_timeline))
+    global_timeline = apply_timeline_rules(raw_timeline, rules)
+    has_week_rules = any(rule_weeks(rule) for rule in rules)
+    week_timeline_cache = {}
+
+    def timeline_for_week(week):
+        if not raw_timeline or not has_week_rules:
+            return global_timeline
+        cached = week_timeline_cache.get(week)
+        if cached is None:
+            cached = apply_timeline_rules(raw_timeline, rules, week=week)
+            week_timeline_cache[week] = cached
+        return cached
+
     fill_timeline = bool(sync_timeline and allow_course_timeline)
 
     subjects = {}
@@ -317,9 +331,14 @@ def build_schedule(
 
     def rename_subject(subject_id: str, title: str):
         subject = subjects.get(subject_id)
-        if subject is not None and title:
-            subject["name"] = title
-            subject["simplifiedName"] = _simplified_name(title)
+        if subject is None or not title:
+            return
+        old_name = subject["name"]
+        if old_name != title:
+            subjects_by_name.pop(old_name, None)
+        subject["name"] = title
+        subject["simplifiedName"] = _simplified_name(title)
+        subjects_by_name[title] = subject
 
     if sync_courses:
         for course in courses:
@@ -346,15 +365,16 @@ def build_schedule(
         if not name:
             skipped += 1
             continue
-        rule = match_rule(name, rules, "course")
-        if is_excluded(name, course_exclusions) or (rule and rule.get("exclude")):
+        global_rule = match_rule(name, rules, "course")
+        if is_excluded(name, course_exclusions) or (global_rule and global_rule.get("exclude")):
             skipped += 1
             continue
         teacher = str(lesson.get("teacherName") or lesson.get("teacher") or "").strip()
         location = str(lesson.get("location") or lesson.get("classroom") or "").strip()
-        subject_id = ensure_subject(name, teacher, location) if sync_courses else ""
-        if rule:
-            rename_subject(subject_id, rule.get("title"))
+        if sync_courses:
+            base_subject_id = ensure_subject(name, teacher, location)
+            if global_rule:
+                rename_subject(base_subject_id, global_rule.get("title"))
         if not fill_timeline:
             continue
         try:
@@ -370,73 +390,131 @@ def build_schedule(
             if number >= 1:
                 week_values.add(number)
         weeks = sorted(week_values)
-        entry_type = "class" if sync_courses else "activity"
-        lesson_times = None
-        if server_timeline:
-            begin_number = lesson.get("beginNumber") or lesson.get("startSection") or 0
-            length = lesson.get("length") or lesson.get("sectionLength") or 1
-            try:
-                begin_number = int(begin_number)
-                length = int(length)
-            except (TypeError, ValueError):
-                begin_number, length = 0, 1
-            if begin_number >= 1 and _server_period_excluded(
-                server_timeline, day, begin_number, begin_number + length - 1,
-            ):
-                skipped += 1
-                continue
-            lesson_times = _server_lesson_times(lesson, server_timeline)
-            if lesson_times is None:
-                lesson_times = _lesson_times(lesson, times)
-                if lesson_times is not None:
-                    entry_type = "activity"
-        else:
-            lesson_times = _lesson_times(lesson, times)
-        if lesson_times is None and rule and rule.get("start") and rule.get("end"):
-            if rule["start"] < rule["end"]:
-                lesson_times = (rule["start"], rule["end"])
-        if not (1 <= day <= 7) or not weeks or not lesson_times:
+        if not (1 <= day <= 7) or not weeks:
             skipped += 1
             continue
-        start, finish = apply_clock_override(lesson_times[0], lesson_times[1], rule)
-        entry_id = _stable_id("cxe", day, start, finish, subject_id or name, entry_type)
-        timeline = timeline_for(day, weeks)
-        entry = {
-            "id": entry_id,
-            "type": entry_type,
-            "startTime": start,
-            "endTime": finish,
-        }
-        if entry_type == "class":
-            entry["subjectId"] = subject_id
-        else:
-            entry["title"] = mapping_title(name, rule)
-        if entry_id in timeline["_ids"]:
-            continue
-        timeline["_ids"].add(entry_id)
-        timeline["entries"].append(entry)
-        entry_count += 1
+        begin_number = lesson.get("beginNumber") or lesson.get("startSection") or 0
+        length = lesson.get("length") or lesson.get("sectionLength") or 1
+        try:
+            begin_number = int(begin_number)
+            length = int(length)
+        except (TypeError, ValueError):
+            begin_number, length = 0, 1
 
-    if fill_timeline and server_timeline:
-        for activity in _server_activity_slots(server_timeline):
-            activity_days = [activity["day"]] if activity["day"] else list(range(1, 8))
-            for activity_day in activity_days:
-                timeline = timeline_for(activity_day, ["all"])
-                entry_id = _stable_id(
-                    "cxe-activity", activity_day, activity["name"],
-                    activity["start"], activity["end"],
-                )
-                if entry_id in timeline["_ids"]:
+        groups = {}
+        for week in weeks:
+            rule = match_rule(name, rules, "course", week=week, weekday=day)
+            if rule and rule.get("exclude"):
+                continue
+            entry_type = "class" if sync_courses else "activity"
+            lesson_times = None
+            if global_timeline:
+                week_timeline = timeline_for_week(week)
+                if not week_timeline:
+                    week_timeline = {day: []}
+                if begin_number >= 1 and _server_period_excluded(
+                    week_timeline, day, begin_number, begin_number + length - 1,
+                ):
                     continue
-                timeline["_ids"].add(entry_id)
-                timeline["entries"].append({
-                    "id": entry_id,
-                    "type": "activity",
-                    "startTime": activity["start"],
-                    "endTime": activity["end"],
-                    "title": activity["name"],
-                })
-                entry_count += 1
+                lesson_times = _server_lesson_times(lesson, week_timeline)
+                if lesson_times is None:
+                    lesson_times = _lesson_times(lesson, times)
+                    if lesson_times is not None:
+                        entry_type = "activity"
+            else:
+                lesson_times = _lesson_times(lesson, times)
+            if lesson_times is None and rule and rule.get("start") and rule.get("end"):
+                if rule["start"] < rule["end"]:
+                    lesson_times = (rule["start"], rule["end"])
+            if lesson_times is None:
+                continue
+            start, finish = apply_clock_override(lesson_times[0], lesson_times[1], rule)
+            display_name = mapping_title(name, rule)
+            subject_id = ensure_subject(display_name, teacher, location) if sync_courses else ""
+            signature = (entry_type, subject_id or display_name, start, finish)
+            group = groups.get(signature)
+            if group is None:
+                group = {
+                    "weeks": [],
+                    "type": entry_type,
+                    "subject_id": subject_id,
+                    "title": display_name,
+                    "start": start,
+                    "finish": finish,
+                }
+                groups[signature] = group
+            group["weeks"].append(week)
+
+        if not groups:
+            skipped += 1
+            continue
+        for group in groups.values():
+            group_weeks = group["weeks"]
+            entry_id = _stable_id(
+                "cxe", day, group["start"], group["finish"],
+                group["subject_id"] or group["title"], group["type"], *group_weeks,
+            )
+            timeline = timeline_for(day, group_weeks)
+            if entry_id in timeline["_ids"]:
+                continue
+            entry = {
+                "id": entry_id,
+                "type": group["type"],
+                "startTime": group["start"],
+                "endTime": group["finish"],
+            }
+            if group["type"] == "class":
+                entry["subjectId"] = group["subject_id"]
+            else:
+                entry["title"] = group["title"]
+            timeline["_ids"].add(entry_id)
+            timeline["entries"].append(entry)
+            entry_count += 1
+
+    if fill_timeline and global_timeline:
+        activity_groups = {}
+        for week in range(1, max_week + 1):
+            week_timeline = timeline_for_week(week)
+            if not week_timeline:
+                continue
+            for activity in _server_activity_slots(week_timeline):
+                activity_days = [activity["day"]] if activity["day"] else list(range(1, 8))
+                for activity_day in activity_days:
+                    signature = (
+                        activity_day,
+                        activity["name"],
+                        activity["start"],
+                        activity["end"],
+                    )
+                    group = activity_groups.get(signature)
+                    if group is None:
+                        group = {
+                            "weeks": [],
+                            "day": activity_day,
+                            "activity": activity,
+                        }
+                        activity_groups[signature] = group
+                    group["weeks"].append(week)
+        for group in activity_groups.values():
+            group_weeks = group["weeks"]
+            activity = group["activity"]
+            activity_day = group["day"]
+            timeline = timeline_for(activity_day, group_weeks)
+            entry_id = _stable_id(
+                "cxe-activity", activity_day, activity["name"],
+                activity["start"], activity["end"], *group_weeks,
+            )
+            if entry_id in timeline["_ids"]:
+                continue
+            timeline["_ids"].add(entry_id)
+            timeline["entries"].append({
+                "id": entry_id,
+                "type": "activity",
+                "startTime": activity["start"],
+                "endTime": activity["end"],
+                "title": activity["name"],
+            })
+            entry_count += 1
 
     for timeline in timelines.values():
         timeline.pop("_ids", None)
@@ -447,9 +525,9 @@ def build_schedule(
         timelines.values(),
         key=lambda item: (item["dayOfWeek"][0], item["entries"][0]["startTime"] if item["entries"] else ""),
     )
-    max_week = int(data.get("max_week") or 0)
+    max_week = max(1, max_week)
     day_list = fill_breaks(day_list, max_week, break_limit_minutes)
-    day_list = apply_break_rules(day_list, rules)
+    day_list = apply_break_rules(day_list, rules, max_week)
     day_list = merge_day_timelines(day_list, max_week, "cxd")
     entry_count = sum(len(timeline.get("entries") or []) for timeline in day_list)
     uuid = str(curriculum.get("uuid") or "").strip()

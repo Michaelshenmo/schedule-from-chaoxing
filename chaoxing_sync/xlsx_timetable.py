@@ -11,6 +11,7 @@ from .mappings import (
     match_rule,
     mapping_title,
     normalize_rules,
+    rule_weeks,
 )
 from .weeks import parse_weeks
 
@@ -381,12 +382,24 @@ def build_xlsx_schedule(
 ):
     blocks = parsed.get("blocks") or []
     period_count = int(parsed.get("period_count") or 9)
-    max_week = int(parsed.get("max_week") or 20)
+    max_week = max(1, int(parsed.get("max_week") or 20))
     rules = normalize_rules(mappings)
     course_exclusions = split_names(exclude_courses)
     server_timeline = server_timeline if isinstance(server_timeline, dict) else {}
-    server_timeline = filter_timeline_slots(server_timeline, split_names(exclude_timeline))
-    server_timeline = apply_timeline_rules(server_timeline, rules)
+    raw_timeline = filter_timeline_slots(server_timeline, split_names(exclude_timeline))
+    global_timeline = apply_timeline_rules(raw_timeline, rules)
+    has_week_rules = any(rule_weeks(rule) for rule in rules)
+    week_timeline_cache = {}
+
+    def timeline_for_week(week):
+        if not raw_timeline or not has_week_rules:
+            return global_timeline
+        cached = week_timeline_cache.get(week)
+        if cached is None:
+            cached = apply_timeline_rules(raw_timeline, rules, week=week)
+            week_timeline_cache[week] = cached
+        return cached
+
     fill_timeline = bool(sync_timeline and allow_course_timeline)
     subjects = {}
     subjects_by_key = {}
@@ -418,129 +431,198 @@ def build_xlsx_schedule(
 
     def rename_subject(subject_id: str, title: str):
         subject = subjects.get(subject_id)
-        if subject is not None and title:
-            subject["name"] = title
-            subject["simplifiedName"] = _simplified_name(title)
+        if subject is None or not title:
+            return
+        old_name = subject["name"]
+        teacher = str(subject.get("teacher") or "")
+        if old_name != title:
+            subjects_by_key.pop(f"{old_name}\x1f{teacher}", None)
+        subject["name"] = title
+        subject["simplifiedName"] = _simplified_name(title)
+        subjects_by_key[f"{title}\x1f{teacher}"] = subject
+
+    def timeline_for(day: int, weeks):
+        week_values = set()
+        for value in weeks or []:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number >= 1:
+                week_values.add(number)
+        week_values = sorted(week_values) or list(range(1, max_week + 1))
+        key = (day, tuple(week_values))
+        timeline = timelines.get(key)
+        if timeline is None:
+            timeline = {
+                "id": _stable_id("chaoxing-timeline", day, *week_values),
+                "dayOfWeek": [day],
+                "weeks": "all" if week_values == list(range(1, max_week + 1)) else week_values,
+                "entries": [],
+                "_ids": set(),
+            }
+            timelines[key] = timeline
+        return timeline
 
     for block in blocks:
         if not isinstance(block, dict):
             skipped += 1
             continue
         name = str(block.get("name") or "").strip()
-        rule = match_rule(name, rules, "course")
-        if not name or is_excluded(name, course_exclusions) or (rule and rule.get("exclude")):
+        global_rule = match_rule(name, rules, "course")
+        if not name or is_excluded(name, course_exclusions) or (global_rule and global_rule.get("exclude")):
             skipped += 1
             continue
         teacher = str(block.get("teacher") or "").strip()
         location = str(block.get("location") or "").strip()
-        subject_id = ensure_subject(name, teacher, location) if sync_courses else ""
-        if rule:
-            rename_subject(subject_id, rule.get("title"))
+        if sync_courses:
+            base_subject_id = ensure_subject(name, teacher, location)
+            if global_rule:
+                rename_subject(base_subject_id, global_rule.get("title"))
         if not fill_timeline:
             continue
         day = int(block.get("dayOfWeek") or 0)
         start_period = int(block.get("periodStart") or 0)
         end_period = int(block.get("periodEnd") or start_period)
-        weeks = list(block.get("weeks") or [])
+        block_weeks = []
+        for value in block.get("weeks") or []:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number >= 1:
+                block_weeks.append(number)
+        block_weeks = sorted(set(block_weeks)) or list(range(1, max_week + 1))
         if not (1 <= day <= 7) or start_period < 1 or end_period < start_period:
             skipped += 1
             continue
-        slots = _user_timeline_slots(existing_schedule, day, max(period_count, end_period), server_timeline)
-        if end_period > len(slots):
+
+        groups = {}
+        for week in block_weeks:
+            rule = match_rule(name, rules, "course", week=week, weekday=day)
+            if rule and rule.get("exclude"):
+                continue
+            week_timeline = timeline_for_week(week) if raw_timeline else None
+            if raw_timeline and not week_timeline:
+                week_timeline = {day: []}
+            slots = _user_timeline_slots(
+                existing_schedule,
+                day,
+                max(period_count, end_period),
+                week_timeline,
+            )
+            if end_period > len(slots):
+                continue
+            display_name = mapping_title(name, rule)
+            subject_id = ensure_subject(display_name, teacher, location) if sync_courses else ""
+            specs = []
+            if rule and (rule.get("start") or rule.get("end")):
+                first_slot = slots[start_period - 1] if start_period - 1 < len(slots) else None
+                last_slot = slots[end_period - 1] if end_period - 1 < len(slots) else None
+                start_time = rule.get("start") or (first_slot[0] if first_slot else "")
+                end_time = rule.get("end") or (last_slot[1] if last_slot else "")
+                if start_time and end_time and start_time < end_time:
+                    specs.append((start_time, end_time))
+            else:
+                for period in range(start_period, end_period + 1):
+                    slot = slots[period - 1] if period - 1 < len(slots) else None
+                    if not slot:
+                        continue
+                    start_time, end_time = slot
+                    if start_time >= end_time:
+                        continue
+                    specs.append((start_time, end_time))
+            if not specs:
+                continue
+            signature = (subject_id, display_name, tuple(specs))
+            group = groups.get(signature)
+            if group is None:
+                group = {
+                    "weeks": [],
+                    "subject_id": subject_id,
+                    "title": display_name,
+                    "specs": specs,
+                }
+                groups[signature] = group
+            group["weeks"].append(week)
+
+        if not groups:
             skipped += 1
             continue
-        weeks_value = sorted(weeks) if weeks else "all"
-        group_id = _stable_id("chaoxing-block", day, start_period, end_period, subject_id or name)
-        timeline_key = (day, tuple(weeks) if weeks else ("all",))
-        timeline = timelines.get(timeline_key)
-        if timeline is None:
-            timeline = {
-                "id": _stable_id("chaoxing-timeline", day, *timeline_key[1]),
-                "dayOfWeek": [day],
-                "weeks": weeks_value,
-                "entries": [],
-                "_ids": set(),
-            }
-            timelines[timeline_key] = timeline
-
-        if rule and (rule.get("start") or rule.get("end")):
-            first_slot = slots[start_period - 1] if start_period - 1 < len(slots) else None
-            last_slot = slots[end_period - 1] if end_period - 1 < len(slots) else None
-            start_time = rule.get("start") or (first_slot[0] if first_slot else "")
-            end_time = rule.get("end") or (last_slot[1] if last_slot else "")
-            if start_time and end_time and start_time < end_time:
-                entry_id = _stable_id("chaoxing-entry", day, start_time, end_time, subject_id or name)
-                if entry_id not in timeline["_ids"]:
-                    timeline["_ids"].add(entry_id)
-                    entry = {
-                        "id": entry_id,
-                        "type": "class" if sync_courses else "activity",
-                        "startTime": start_time,
-                        "endTime": end_time,
-                        "_breakGroup": group_id,
-                    }
-                    if sync_courses:
-                        entry["subjectId"] = subject_id
-                    else:
-                        entry["title"] = mapping_title(name, rule)
-                    timeline["entries"].append(entry)
-                    entry_count += 1
-                continue
-
-        for period in range(start_period, end_period + 1):
-            slot = slots[period - 1] if period - 1 < len(slots) else None
-            if not slot:
-                skipped += 1
-                continue
-            start_time, end_time = slot
-            if start_time >= end_time:
-                skipped += 1
-                continue
-            entry_id = _stable_id("chaoxing-entry", day, start_time, end_time, subject_id or name)
-            if entry_id in timeline["_ids"]:
-                continue
-            timeline["_ids"].add(entry_id)
-            entry = {
-                "id": entry_id,
-                "type": "class" if sync_courses else "activity",
-                "startTime": start_time,
-                "endTime": end_time,
-                "_breakGroup": group_id,
-            }
-            if sync_courses:
-                entry["subjectId"] = subject_id
-            else:
-                entry["title"] = mapping_title(name, rule)
-            timeline["entries"].append(entry)
-            entry_count += 1
-
-    if fill_timeline and server_timeline:
-        for activity in _server_activity_slots(server_timeline):
-            activity_days = [activity["day"]] if activity["day"] else list(range(1, 8))
-            for activity_day in activity_days:
-                key = (activity_day, ("all",))
-                timeline = timelines.get(key)
-                if timeline is None:
-                    timeline = {
-                        "id": _stable_id("chaoxing-timeline", activity_day, "all"),
-                        "dayOfWeek": [activity_day],
-                        "weeks": "all",
-                        "entries": [],
-                        "_ids": set(),
-                    }
-                    timelines[key] = timeline
-                entry_id = _stable_id("chaoxing-activity", activity_day, activity["name"], activity["start"], activity["end"])
+        entry_type = "class" if sync_courses else "activity"
+        for group in groups.values():
+            group_weeks = sorted(group["weeks"])
+            timeline = timeline_for(day, group_weeks)
+            group_id = _stable_id(
+                "chaoxing-block", day, start_period, end_period,
+                group["subject_id"] or group["title"],
+            )
+            for start_time, end_time in group["specs"]:
+                entry_id = _stable_id(
+                    "chaoxing-entry", day, start_time, end_time,
+                    group["subject_id"] or group["title"], *group_weeks,
+                )
                 if entry_id in timeline["_ids"]:
                     continue
                 timeline["_ids"].add(entry_id)
-                timeline["entries"].append({
+                entry = {
                     "id": entry_id,
-                    "type": "activity",
-                    "startTime": activity["start"],
-                    "endTime": activity["end"],
-                    "title": activity["name"],
-                })
+                    "type": entry_type,
+                    "startTime": start_time,
+                    "endTime": end_time,
+                    "_breakGroup": group_id,
+                }
+                if entry_type == "class":
+                    entry["subjectId"] = group["subject_id"]
+                else:
+                    entry["title"] = group["title"]
+                timeline["entries"].append(entry)
                 entry_count += 1
+
+    if fill_timeline and global_timeline:
+        activity_groups = {}
+        for week in range(1, max_week + 1):
+            week_timeline = timeline_for_week(week)
+            if not week_timeline:
+                continue
+            for activity in _server_activity_slots(week_timeline):
+                activity_days = [activity["day"]] if activity["day"] else list(range(1, 8))
+                for activity_day in activity_days:
+                    signature = (
+                        activity_day,
+                        activity["name"],
+                        activity["start"],
+                        activity["end"],
+                    )
+                    group = activity_groups.get(signature)
+                    if group is None:
+                        group = {
+                            "weeks": [],
+                            "day": activity_day,
+                            "activity": activity,
+                        }
+                        activity_groups[signature] = group
+                    group["weeks"].append(week)
+        for group in activity_groups.values():
+            group_weeks = group["weeks"]
+            activity = group["activity"]
+            activity_day = group["day"]
+            timeline = timeline_for(activity_day, group_weeks)
+            entry_id = _stable_id(
+                "chaoxing-activity", activity_day, activity["name"],
+                activity["start"], activity["end"], *group_weeks,
+            )
+            if entry_id in timeline["_ids"]:
+                continue
+            timeline["_ids"].add(entry_id)
+            timeline["entries"].append({
+                "id": entry_id,
+                "type": "activity",
+                "startTime": activity["start"],
+                "endTime": activity["end"],
+                "title": activity["name"],
+            })
+            entry_count += 1
 
     for timeline in timelines.values():
         timeline.pop("_ids", None)
@@ -562,7 +644,7 @@ def build_xlsx_schedule(
         max_week,
         break_limit_minutes,
     )
-    day_list = apply_break_rules(day_list, rules)
+    day_list = apply_break_rules(day_list, rules, max_week)
     day_list = merge_day_timelines(day_list, max_week, "chaoxing-timeline")
     entry_count = sum(len(timeline.get("entries") or []) for timeline in day_list)
     schedule = {

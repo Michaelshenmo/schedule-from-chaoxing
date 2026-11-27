@@ -52,6 +52,7 @@ class PluginConfig(ConfigBaseModel):
     exclude_courses: str = ""
     exclude_timeline: str = ""
     schedule_mappings: str = ""
+    schedule_max_week: int = 20
     break_limit_minutes: int = 45
     last_sync_at: str = ""
     notify_startup: bool = True
@@ -450,6 +451,14 @@ class Plugin(CW2Plugin):
     @Property(str, notify=configChanged)
     def scheduleMappings(self) -> str:
         return str(self.config.schedule_mappings or "")
+
+    @Property(int, notify=configChanged)
+    def maxWeek(self) -> int:
+        try:
+            value = int(self.config.schedule_max_week)
+        except (TypeError, ValueError):
+            value = 20
+        return max(1, min(value, 60))
 
     @Property(int, notify=configChanged)
     def breakLimitMinutes(self) -> int:
@@ -923,6 +932,12 @@ class Plugin(CW2Plugin):
             self._on_sync_failed(f"保存课表失败：{error}", reason)
             return
         self.config.last_sync_at = info.get("synced_at") or datetime.now().isoformat(timespec="seconds")
+        try:
+            synced_max_week = int(info.get("max_week") or 0)
+        except (TypeError, ValueError):
+            synced_max_week = 0
+        if synced_max_week >= 1:
+            self.config.schedule_max_week = max(1, min(synced_max_week, 60))
         self._save_config()
         self._syncing = False
         self.syncStateChanged.emit()
