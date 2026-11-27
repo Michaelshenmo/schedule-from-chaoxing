@@ -373,6 +373,15 @@ class Plugin(CW2Plugin):
             title="学习通课表同步",
             icon="ic_fluent_calendar_20_regular",
         )
+        try:
+            self.api.ui.register_shortcut(
+                shortcut_id="sync-now",
+                name="同步课表",
+                icon="ic_fluent_arrow_sync_20_regular",
+                action=self.triggerSync,
+            )
+        except Exception as error:
+            logger.warning(f"Failed to register tray shortcut: {error}")
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._auto_sync)
         self._apply_config()
@@ -389,6 +398,10 @@ class Plugin(CW2Plugin):
                 worker.wait(1500)
         self._sync_thread = None
         self._account_thread = None
+        try:
+            self.api.ui.unregister_plugin_shortcuts(self.pid)
+        except Exception as error:
+            logger.warning(f"Failed to unregister tray shortcuts: {error}")
         logger.info("Chaoxing schedule plugin unloaded")
 
     @Property(bool, notify=accountStateChanged)
