@@ -419,9 +419,6 @@ FluentPage {
         function onConfigChanged() {
             page.refresh()
         }
-        function onAccountStateChanged() {
-            page.refresh()
-        }
     }
 
     ColumnLayout {
@@ -595,24 +592,36 @@ FluentPage {
             icon.name: "ic_fluent_person_20_regular"
             title: "账号"
             description: backend && backend.credentialsConfigured
-                ? "已保存加密账号，重新输入可覆盖旧账号"
-                : "尚未设置账号，请先输入超星学习通手机号/学号和密码"
+                ? "已保存加密账号；如需更换，请先清除账号"
+                : "尚未设置账号，请先输入手机号/超星号和密码"
 
             SettingItem {
-                title: "手机号 / 学号"
+                Layout.preferredHeight: (!backend || !backend.credentialsConfigured) ? implicitHeight : 0
+                clip: true
+                enabled: !backend || !backend.credentialsConfigured
+                title: "手机号 / 超星号"
                 description: "仅用于登录超星学习通"
 
                 TextField {
                     id: phoneField
                     Layout.preferredWidth: 250
-                    placeholderText: "请输入手机号或学号"
+                    placeholderText: "请输入手机号或超星号"
                     selectByMouse: true
+                    enabled: backend ? !backend.accountChecking : true
+                    onTextChanged: {
+                        if (backend) {
+                            backend.resetAccountVerification()
+                        }
+                    }
                 }
             }
 
             SettingItem {
+                Layout.preferredHeight: (!backend || !backend.credentialsConfigured) ? implicitHeight : 0
+                clip: true
+                enabled: !backend || !backend.credentialsConfigured
                 title: "密码"
-                description: "保存后不会显示明文"
+                description: "验证并保存后不会显示明文"
 
                 TextField {
                     id: passwordField
@@ -620,52 +629,75 @@ FluentPage {
                     placeholderText: "请输入密码"
                     echoMode: TextInput.Password
                     selectByMouse: true
+                    enabled: backend ? !backend.accountChecking : true
+                    onTextChanged: {
+                        if (backend) {
+                            backend.resetAccountVerification()
+                        }
+                    }
                 }
             }
 
             SettingItem {
-                title: "保存账号"
-                description: backend && backend.accountChecking
-                    ? "正在验证账号，请稍候…"
-                    : "保存前会先验证登录，成功后加密存储"
+                title: backend && backend.credentialsConfigured
+                    ? "账号已保存"
+                    : "验证并保存"
+                description: backend && backend.credentialsConfigured
+                    ? "账号已加密保存；如需更换，请先清除账号"
+                    : backend && backend.accountChecking
+                        ? "正在验证账号，请稍候…"
+                        : backend && backend.accountVerified
+                            ? "验证通过，可以保存账号"
+                            : "先验证账号，验证通过后才能保存"
 
                 ColumnLayout {
                     spacing: 6
 
                     RowLayout {
                         spacing: 8
+                        visible: !backend || !backend.credentialsConfigured
 
                         Button {
-                            text: "保存并验证"
-                            highlighted: true
+                            text: "验证账号"
                             enabled: backend
                                 && !backend.accountChecking
                                 && !backend.syncing
                                 && phoneField.text.length > 0
                                 && passwordField.text.length > 0
+                            onClicked: backend.verifyAccount(phoneField.text, passwordField.text)
+                        }
+
+                        Button {
+                            text: "保存账号"
+                            highlighted: true
+                            enabled: backend
+                                && backend.accountVerified
+                                && !backend.accountChecking
+                                && !backend.syncing
                             onClicked: {
-                                if (backend.saveAccount(phoneField.text, passwordField.text)) {
+                                if (backend.saveVerifiedAccount()) {
                                     phoneField.text = ""
                                     passwordField.text = ""
                                 }
                             }
                         }
+                    }
 
-                        Button {
-                            text: "清除账号"
-                            enabled: backend && backend.credentialsConfigured && !backend.accountChecking && !backend.syncing
-                            onClicked: backend.clearAccount()
-                        }
+                    Button {
+                        text: "清除账号"
+                        visible: backend && backend.credentialsConfigured
+                        enabled: backend && backend.credentialsConfigured && !backend.accountChecking && !backend.syncing
+                        onClicked: backend.clearAccount()
                     }
 
                     Text {
                         Layout.fillWidth: true
                         typography: Typography.Caption
                         wrapMode: Text.Wrap
-                        visible: text.length > 0
+                        visible: (!backend || !backend.credentialsConfigured) && text.length > 0
                         text: backend ? backend.accountMessage : ""
                         color: backend && backend.accountError
-                            ? "#C42B1C"
+                            ? Theme.currentTheme.colors.systemCriticalColor
                             : Theme.currentTheme.colors.textSecondaryColor
                     }
                 }

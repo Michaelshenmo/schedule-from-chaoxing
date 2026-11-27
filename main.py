@@ -346,6 +346,8 @@ class Plugin(CW2Plugin):
         self._account_thread = None
         self._syncing = False
         self._account_checking = False
+        self._account_verified = False
+        self._pending_encrypted_account = ""
         self._closing = False
         self._status = ""
         self._status_details = "尚无同步记录"
@@ -485,6 +487,10 @@ class Plugin(CW2Plugin):
     def accountChecking(self) -> bool:
         return self._account_checking
 
+    @Property(bool, notify=accountStateChanged)
+    def accountVerified(self) -> bool:
+        return self._account_verified
+
     @Property(str, notify=accountStateChanged)
     def accountMessage(self) -> str:
         return self._account_message
@@ -525,30 +531,32 @@ class Plugin(CW2Plugin):
             return "尚未同步"
 
     @Slot(str, str, result=bool)
-    def saveAccount(self, username: str, password: str) -> bool:
+    def verifyAccount(self, username: str, password: str) -> bool:
         username = str(username or "").strip()
         password = str(password or "")
         if not username or not password:
-            self._account_message = "请输入手机号/学号和密码"
+            self._account_message = "请输入手机号/超星号和密码"
             self._account_error = True
             self.accountStateChanged.emit()
-            self._set_status("请输入手机号/学号和密码")
+            self._set_status("请输入手机号/超星号和密码")
             return False
         if self._syncing:
-            self._account_message = "正在同步课表，请稍后再保存账号"
+            self._account_message = "正在同步课表，请稍后再验证账号"
             self._account_error = True
             self.accountStateChanged.emit()
-            self._set_status("正在同步课表，请稍后再保存账号")
+            self._set_status("正在同步课表，请稍后再验证账号")
             return False
         if self._account_checking or self._closing:
             return False
         self._account_checking = True
+        self._account_verified = False
+        self._pending_encrypted_account = ""
         self._account_message = "正在验证账号，请稍候…"
         self._account_error = False
         self.accountStateChanged.emit()
         self._set_status("正在验证账号，请稍候…")
         thread = AccountCheckThread(username, password)
-        thread.succeeded.connect(self._on_account_checked)
+        thread.succeeded.connect(self._on_account_verified)
         thread.failed.connect(self._on_account_failed)
         thread.finished.connect(lambda: ACTIVE_THREADS.discard(thread))
         ACTIVE_THREADS.add(thread)
@@ -556,11 +564,55 @@ class Plugin(CW2Plugin):
         thread.start()
         return True
 
+    @Slot(result=bool)
+    def saveVerifiedAccount(self) -> bool:
+        if self._syncing or self._account_checking or self._closing:
+            return False
+        if not self._account_verified or not self._pending_encrypted_account:
+            self._account_message = "请先验证账号"
+            self._account_error = True
+            self.accountStateChanged.emit()
+            self._set_status("请先验证账号")
+            return False
+        encrypted_account = self._pending_encrypted_account
+        self._pending_encrypted_account = ""
+        self._account_verified = False
+        self.config.encrypted_account = encrypted_account
+        self.config.last_sync_at = ""
+        self._account_message = "账号验证成功，已加密保存"
+        self._account_error = False
+        self.accountStateChanged.emit()
+        self._apply_config()
+        self._save_config()
+        self._set_status("账号已保存；稍后将自动同步课表")
+        QTimer.singleShot(1000, self._startup_sync)
+        logger.info("Chaoxing account saved")
+        return True
+
+    @Slot()
+    def resetAccountVerification(self):
+        if self._account_checking:
+            return
+        if not self._account_verified and not self._pending_encrypted_account:
+            if self._account_error:
+                self._account_error = False
+                self._account_message = ""
+                self.accountStateChanged.emit()
+            return
+        self._account_verified = False
+        self._pending_encrypted_account = ""
+        self._account_message = "账号信息已修改，请重新验证"
+        self._account_error = False
+        self.accountStateChanged.emit()
+        self._set_status("账号信息已修改，请重新验证")
+
     @Slot()
     def clearAccount(self):
         if self._account_checking or self._syncing:
             return
         self.config.encrypted_account = ""
+        self._account_verified = False
+        self._pending_encrypted_account = ""
         self._account_message = "已清除保存的账号"
         self._account_error = False
         self.accountStateChanged.emit()
@@ -876,26 +928,25 @@ class Plugin(CW2Plugin):
         thread.start()
 
     @Slot(str)
-    def _on_account_checked(self, encrypted_account: str):
+    def _on_account_verified(self, encrypted_account: str):
         if self._closing:
             return
         self._account_checking = False
-        self._account_message = "账号验证成功，已加密保存"
+        self._account_verified = True
+        self._pending_encrypted_account = encrypted_account
+        self._account_message = "验证成功，请点击保存账号"
         self._account_error = False
-        self.config.encrypted_account = encrypted_account
-        self.config.last_sync_at = ""
         self.accountStateChanged.emit()
-        self._apply_config()
-        self._save_config()
-        self._set_status("账号验证成功，已加密保存；重新输入可覆盖旧账号")
-        QTimer.singleShot(1000, self._startup_sync)
-        logger.info("Chaoxing account saved")
+        self._set_status("账号验证成功，请点击保存账号")
+        logger.info("Chaoxing account verified, waiting for save")
 
     @Slot(str)
     def _on_account_failed(self, message: str):
         if self._closing:
             return
         self._account_checking = False
+        self._account_verified = False
+        self._pending_encrypted_account = ""
         self._account_message = f"账号验证失败：{message}"
         self._account_error = True
         self.accountStateChanged.emit()
