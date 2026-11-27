@@ -15,53 +15,47 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
-      
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          profile: minimal
-          override: true
-      
-      - name: Install git-cliff
-        run: |
-          cargo install git-cliff
-      
+
       - name: Install dependencies
         run: |
           pip install -e ".[dev]"
-      
+
       - name: Build plugin packages
         run: |
           # Build .cwplugin format
           cw-plugin-pack
           # Build .zip format
           cw-plugin-pack --format zip
-      
+
       - name: Publish to plugin registry
         env:
           CWPT_TOKEN: ${{ secrets.CWPT_TOKEN }}
         run: |
           cw-plugin-publish
-      
-      - name: Get version from tag
-        id: get_version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_ENV
-      
-      - name: Generate changelog with git-cliff
-        id: generate_changelog
+
+      - name: Get version and previous tag
+        id: version
         run: |
-          git-cliff --config .git-cliff.toml --tag v${{ env.VERSION }} > CHANGELOG.md
-          echo "CHANGELOG<<EOF" >> $GITHUB_ENV
-          cat CHANGELOG.md >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-      
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          PREVIOUS_TAG="$(git describe --tags --abbrev=0 --match 'v*.*.*' HEAD^ 2>/dev/null || true)"
+          echo "PREVIOUS_TAG=$PREVIOUS_TAG" >> "$GITHUB_ENV"
+
+      - name: Build release notes
+        run: |
+          REPO_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          if [ -n "${PREVIOUS_TAG}" ]; then
+            echo "RELEASE_NOTES=**Comparing changes**: [${PREVIOUS_TAG}...v${VERSION}](${REPO_URL}/compare/${PREVIOUS_TAG}...v${VERSION})" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_NOTES=**Release**: [v${VERSION}](${REPO_URL}/releases/tag/v${VERSION})" >> "$GITHUB_ENV"
+          fi
+
       - name: Create Release
         id: create_release
         uses: softprops/action-gh-release@v2
@@ -72,5 +66,5 @@ jobs:
           files: |
             *.cwplugin
             *.zip
-          body: ${{ env.CHANGELOG }}
+          body: ${{ env.RELEASE_NOTES }}
           generate_release_notes: false
