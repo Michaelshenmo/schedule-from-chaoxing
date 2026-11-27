@@ -1,6 +1,6 @@
 [project]
 name = "com-msyark-chaoxingsync"
-version = "1.0.3"
+version = "1.1.0"
 description = "从超星学习通自动拉取课表并写入独立的 Class Widgets 2 课表"
 authors = [
     {name = "Michaelshenmo"},
