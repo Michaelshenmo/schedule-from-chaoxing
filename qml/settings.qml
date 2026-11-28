@@ -391,7 +391,7 @@ FluentPage {
     }
 
     function handleConfigItemClick(key, label, warning, selected, empty) {
-        if (selected && empty) {
+        if (configDialogMode === "import" && selected && empty) {
             pendingConfigItemKey = key
             pendingConfigItemLabel = label
             pendingConfigItemWarning = warning || "勾选后将恢复默认设置"
@@ -1787,7 +1787,7 @@ FluentPage {
         standardButtons: Dialog.Ok | Dialog.Cancel
         closePolicy: Popup.NoAutoClose
 
-        onOpened: page.updateConfigDialogButtons()
+        onOpened: Qt.callLater(page.updateConfigDialogButtons)
         onAccepted: page.confirmConfigDialog()
         onRejected: {
             if (page.configDialogMode === "import" && backend) {
@@ -1802,8 +1802,8 @@ FluentPage {
             Text {
                 Layout.fillWidth: true
                 text: page.configDialogMode === "import"
-                    ? "勾选需要导入的项目；未勾选的项目沿用当前设置。空项勾选后会恢复默认值。"
-                    : "勾选需要导出的项目；账号与密码不会导出。"
+                    ? "勾选需要导入的项目。"
+                    : "勾选需要导出的项目。"
                 typography: Typography.Caption
                 color: Theme.currentTheme.colors.textSecondaryColor
                 wrapMode: Text.Wrap
