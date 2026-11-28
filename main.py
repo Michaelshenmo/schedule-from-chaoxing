@@ -758,6 +758,56 @@ class Plugin(CW2Plugin):
     def triggerSync(self):
         self._start_sync("manual")
 
+    @Slot(result=str)
+    def exportConfig(self) -> str:
+        path, _ = QFileDialog.getSaveFileName(
+            QApplication.activeWindow(),
+            "导出配置",
+            str(Path.home() / "chaoxing-sync-config.json"),
+            "JSON 配置 (*.json);;所有文件 (*)",
+        )
+        if not path:
+            return ""
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        try:
+            payload = self._config_export_payload()
+            Path(path).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except Exception as error:
+            logger.warning(f"Failed to export config: {error}")
+            self._set_status(f"导出配置失败：{error}")
+            return f"导出配置失败：{error}"
+        self._set_status(f"配置已导出：{Path(path).name}")
+        return f"已导出配置到 {path}"
+
+    @Slot(result=str)
+    def importConfig(self) -> str:
+        if self._syncing:
+            return "正在同步课表，请稍后再导入配置"
+        path, _ = QFileDialog.getOpenFileName(
+            QApplication.activeWindow(),
+            "导入配置",
+            str(Path.home()),
+            "JSON 配置 (*.json);;所有文件 (*)",
+        )
+        if not path:
+            return ""
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+            self._apply_imported_config(data)
+        except Exception as error:
+            logger.warning(f"Failed to import config: {error}")
+            self._set_status(f"导入配置失败：{error}")
+            return f"导入配置失败：{error}"
+        self._migrate_exclusions_to_mappings()
+        self._save_config()
+        self._apply_config()
+        self._set_status("配置已导入；学习通账号保持不变")
+        return f"已从 {Path(path).name} 导入配置"
+
     @Slot(result=bool)
     def switchToTargetSchedule(self) -> bool:
         name = _sanitize_schedule_name(self.config.schedule_name)
@@ -789,6 +839,109 @@ class Plugin(CW2Plugin):
             self.api.config.save()
         except Exception as error:
             logger.warning(f"Failed to save plugin config: {error}")
+
+    def _config_export_payload(self):
+        return {
+            "format": "class-widgets-2.chaoxing-sync.config",
+            "version": 1,
+            "plugin_id": self.pid,
+            "exported_at": datetime.now().isoformat(timespec="seconds"),
+            "settings": {
+                # Never export credentials, even when an account is configured.
+                "encrypted_account": "",
+                "sync_courses": bool(self.config.sync_courses),
+                "sync_timeline": bool(self.config.sync_timeline),
+                "interval_minutes": int(self.config.interval_minutes),
+                "schedule_name": str(self.config.schedule_name or ""),
+                "timetable_file": str(self.config.timetable_file or ""),
+                "timetable_url": str(self.config.timetable_url or ""),
+                "timeline_server_url": str(self.config.timeline_server_url or ""),
+                "device_sn": str(self.config.device_sn or ""),
+                "exclude_courses": str(self.config.exclude_courses or ""),
+                "exclude_timeline": str(self.config.exclude_timeline or ""),
+                "schedule_mappings": normalize_rules(self.config.schedule_mappings),
+                "schedule_max_week": int(self.config.schedule_max_week or 20),
+                "break_limit_minutes": int(self.config.break_limit_minutes),
+                "notify_startup": bool(self.config.notify_startup),
+                "notify_scheduled": bool(self.config.notify_scheduled),
+                "notify_manual": bool(self.config.notify_manual),
+            },
+        }
+
+    def _apply_imported_config(self, data):
+        if not isinstance(data, dict):
+            raise ValueError("配置文件格式不正确")
+        settings = data.get("settings")
+        if not isinstance(settings, dict):
+            settings = data
+        known_keys = {
+            "sync_courses",
+            "sync_timeline",
+            "interval_minutes",
+            "schedule_name",
+            "timetable_file",
+            "timetable_url",
+            "timeline_server_url",
+            "device_sn",
+            "exclude_courses",
+            "exclude_timeline",
+            "schedule_mappings",
+            "schedule_max_week",
+            "break_limit_minutes",
+            "notify_startup",
+            "notify_scheduled",
+            "notify_manual",
+        }
+        if not any(key in settings for key in known_keys):
+            raise ValueError("配置文件不包含可导入的设置")
+
+        if "sync_courses" in settings:
+            self.config.sync_courses = _coerce_bool(settings["sync_courses"], self.config.sync_courses)
+        if "sync_timeline" in settings:
+            self.config.sync_timeline = _coerce_bool(settings["sync_timeline"], self.config.sync_timeline)
+        if "interval_minutes" in settings:
+            try:
+                interval = int(settings["interval_minutes"])
+            except (TypeError, ValueError):
+                raise ValueError("自动同步间隔格式不正确")
+            self.config.interval_minutes = max(-1, min(interval, 1440))
+        if "schedule_name" in settings:
+            self.config.schedule_name = _sanitize_schedule_name(str(settings["schedule_name"] or ""))
+        for key in (
+            "timetable_file",
+            "timetable_url",
+            "timeline_server_url",
+            "device_sn",
+            "exclude_courses",
+            "exclude_timeline",
+        ):
+            if key in settings:
+                setattr(self.config, key, str(settings[key] or "").strip())
+        if "schedule_mappings" in settings:
+            raw = settings["schedule_mappings"]
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw or "[]")
+                except ValueError as error:
+                    raise ValueError(f"日程映射格式不正确：{error}")
+            if not isinstance(raw, list):
+                raise ValueError("日程映射格式不正确")
+            self.config.schedule_mappings = dump_rules(normalize_rules(raw))
+        if "schedule_max_week" in settings:
+            try:
+                max_week = int(settings["schedule_max_week"])
+            except (TypeError, ValueError):
+                raise ValueError("最大周次格式不正确")
+            self.config.schedule_max_week = max(1, min(max_week, 60))
+        if "break_limit_minutes" in settings:
+            try:
+                break_limit = int(settings["break_limit_minutes"])
+            except (TypeError, ValueError):
+                raise ValueError("课间上限格式不正确")
+            self.config.break_limit_minutes = max(-1, min(break_limit, 1440))
+        for key in ("notify_startup", "notify_scheduled", "notify_manual"):
+            if key in settings:
+                setattr(self.config, key, _coerce_bool(settings[key], getattr(self.config, key)))
 
     def _load_show_timetable_export(self) -> bool:
         path = self.PATH / UI_CONFIG_NAME

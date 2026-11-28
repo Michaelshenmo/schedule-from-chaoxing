@@ -10,6 +10,8 @@ FluentPage {
     property var backend: PluginBackendBridge.get_backend(pluginId)
     property bool ready: false
     property var mappingRules: []
+    property string configNotice: ""
+    property bool configNoticeError: false
     property int editingIndex: -1
     property var editingRule: ({
         "name": "",
@@ -1078,6 +1080,68 @@ FluentPage {
                             backend.setNotifyManual(checked)
                         }
                     }
+                }
+            }
+        }
+
+
+        SettingExpander {
+            Layout.fillWidth: true
+            expanded: false
+            icon.name: "ic_fluent_document_20_regular"
+            title: "配置导入导出"
+            description: "备份或恢复插件设置；导出的文件不包含学习通账号"
+
+            SettingItem {
+                title: "导出配置"
+                description: "将当前设置保存为 JSON 文件；学习通账号会留空"
+
+                Button {
+                    text: "导出"
+                    icon.name: "ic_fluent_arrow_upload_20_regular"
+                    enabled: backend
+                    onClicked: {
+                        var message = backend.exportConfig()
+                        page.configNotice = message
+                        page.configNoticeError = message.indexOf("失败") >= 0
+                    }
+                }
+            }
+
+            SettingItem {
+                title: "导入配置"
+                description: "从 JSON 文件恢复设置；不会修改已保存的学习通账号"
+
+                Button {
+                    text: "导入"
+                    icon.name: "ic_fluent_arrow_download_20_regular"
+                    enabled: backend && !backend.syncing
+                    onClicked: {
+                        var message = backend.importConfig()
+                        page.configNotice = message
+                        page.configNoticeError = message.indexOf("失败") >= 0
+                    }
+                }
+            }
+
+            Item {
+                Layout.fillWidth: true
+                Layout.leftMargin: 58
+                Layout.rightMargin: 44
+                Layout.topMargin: 4
+                Layout.bottomMargin: 10
+                Layout.preferredHeight: configNoticeText.implicitHeight
+                visible: page.configNotice.length > 0
+
+                Text {
+                    id: configNoticeText
+                    anchors.fill: parent
+                    typography: Typography.Caption
+                    color: page.configNoticeError
+                        ? Theme.currentTheme.colors.systemCriticalColor
+                        : Theme.currentTheme.colors.textSecondaryColor
+                    wrapMode: Text.Wrap
+                    text: page.configNotice
                 }
             }
         }
