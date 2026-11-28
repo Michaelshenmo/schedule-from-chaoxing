@@ -495,6 +495,8 @@ class Plugin(CW2Plugin):
     statusDetailsChanged = Signal()
     syncStateChanged = Signal()
     accountStateChanged = Signal()
+    configImportFinished = Signal(str)
+    configImportAccountFailed = Signal(str)
 
     def __init__(self, api: PluginAPI):
         super().__init__(api)
@@ -508,6 +510,9 @@ class Plugin(CW2Plugin):
         self._account_verified = False
         self._pending_encrypted_account = ""
         self._pending_config_import = None
+        self._pending_import_keys = []
+        self._config_import_checking = False
+        self._import_check_thread = None
         self._closing = False
         self._status = ""
         self._status_details = "尚无同步记录"
@@ -555,11 +560,15 @@ class Plugin(CW2Plugin):
         self._closing = True
         if self._timer is not None:
             self._timer.stop()
-        for worker in (self._sync_thread, self._account_thread):
+        for worker in (self._sync_thread, self._account_thread, self._import_check_thread):
             if worker is not None and worker.isRunning():
                 worker.wait(1500)
         self._sync_thread = None
         self._account_thread = None
+        self._import_check_thread = None
+        self._pending_config_import = None
+        self._pending_import_keys = []
+        self._config_import_checking = False
         try:
             self.api.ui.unregister_plugin_shortcuts(self.pid)
         except Exception as error:
@@ -650,6 +659,10 @@ class Plugin(CW2Plugin):
     @Property(bool, notify=accountStateChanged)
     def accountVerified(self) -> bool:
         return self._account_verified
+
+    @Property(bool, notify=accountStateChanged)
+    def configImportChecking(self) -> bool:
+        return self._config_import_checking
 
     @Property(str, notify=accountStateChanged)
     def accountMessage(self) -> str:
@@ -1006,46 +1019,126 @@ class Plugin(CW2Plugin):
         )
 
     @Slot(str, result=str)
-    def applyImportedConfig(self, selected_keys: str) -> str:
+    def confirmImportedConfig(self, selected_keys: str) -> str:
         if self._pending_config_import is None:
-            return "请先选择要导入的配置文件"
+            return json.dumps(
+                {"status": "error", "message": "请先选择要导入的配置文件"},
+                ensure_ascii=False,
+            )
         try:
             selected = _parse_selected_config_keys(selected_keys)
         except ValueError as error:
-            return f"导入配置失败：{error}"
+            return json.dumps(
+                {"status": "error", "message": f"导入配置失败：{error}"},
+                ensure_ascii=False,
+            )
         if not selected:
-            return "未选择要导入的配置项"
+            return json.dumps(
+                {"status": "error", "message": "未选择要导入的配置项"},
+                ensure_ascii=False,
+            )
+        settings = self._pending_config_import["settings"]
+        account_selected = "chaoxing_account" in selected
+        account = str(settings.get("chaoxing_account") or "").strip()
+        password = str(settings.get("chaoxing_password") or "")
+        if account_selected and account and password:
+            self._pending_import_keys = selected
+            self._config_import_checking = True
+            self.accountStateChanged.emit()
+            thread = AccountCheckThread(account, password)
+            thread.succeeded.connect(self._on_import_account_verified)
+            thread.failed.connect(self._on_import_account_failed)
+            thread.finished.connect(lambda: ACTIVE_THREADS.discard(thread))
+            ACTIVE_THREADS.add(thread)
+            self._import_check_thread = thread
+            thread.start()
+            return json.dumps(
+                {"status": "verifying", "message": "正在验证学习通账号…"},
+                ensure_ascii=False,
+            )
+        legacy = str(settings.get("encrypted_account") or "").strip()
+        account_blob = None if (account_selected and legacy) else ""
+        result = self._finish_import(selected, account_blob=account_blob)
+        return json.dumps(result, ensure_ascii=False)
+
+    @Slot(result=str)
+    def importConfigWithoutAccount(self) -> str:
+        if self._pending_config_import is None:
+            return "请先选择要导入的配置文件"
+        selected = [
+            key for key in self._pending_import_keys
+            if key != "chaoxing_account"
+        ]
+        if not selected:
+            return "没有其他可导入的配置项"
+        result = self._finish_import(selected, account_blob="")
+        return result.get("message", "")
+
+    def _finish_import(self, selected, account_blob=None, account_verified=False):
         pending = self._pending_config_import
+        if pending is None:
+            return {"status": "error", "message": "请先选择要导入的配置文件"}
+        selected = list(dict.fromkeys(selected or []))
         try:
-            self._config_apply_import(pending["settings"], selected)
+            self._config_apply_import(pending["settings"], selected, account_blob)
         except Exception as error:
             logger.warning(f"Failed to import config: {error}")
             self._set_status(f"导入配置失败：{error}")
-            return f"导入配置失败：{error}"
+            self._config_import_checking = False
+            self._pending_config_import = None
+            self._pending_import_keys = []
+            self.accountStateChanged.emit()
+            return {"status": "error", "message": f"导入配置失败：{error}"}
         account_selected = "chaoxing_account" in selected
-        account_imported = False
-        if account_selected:
-            settings = pending["settings"]
-            account = str(settings.get("chaoxing_account") or "").strip()
-            password = str(settings.get("chaoxing_password") or "")
-            legacy = str(settings.get("encrypted_account") or "").strip()
-            account_imported = bool((account and password) or legacy)
+        account_imported = bool(self.config.encrypted_account) if account_selected else False
         self._pending_config_import = None
+        self._pending_import_keys = []
+        self._config_import_checking = False
+        self.accountStateChanged.emit()
         self._migrate_exclusions_to_mappings()
         self._save_config()
         self._apply_config()
         self._set_status("配置已导入")
         message = f"已从 {Path(pending['path']).name} 导入选中的配置项"
         if account_selected:
-            message += (
-                "；账号将在下次同步时验证"
-                if account_imported else "；已清除保存的账号"
-            )
-        return message
+            if account_imported:
+                message += (
+                    "；账号已通过验证"
+                    if account_verified
+                    else "；账号已导入，将在下次同步时验证"
+                )
+            else:
+                message += "；已清除保存的账号"
+        return {"status": "done", "message": message}
+
+    @Slot(str)
+    def _on_import_account_verified(self, encrypted_account: str):
+        if self._closing:
+            return
+        self._import_check_thread = None
+        selected = self._pending_import_keys
+        result = self._finish_import(
+            selected,
+            account_blob=encrypted_account,
+            account_verified=True,
+        )
+        self.configImportFinished.emit(result.get("message", ""))
+
+    @Slot(str)
+    def _on_import_account_failed(self, message: str):
+        if self._closing:
+            return
+        self._import_check_thread = None
+        self._config_import_checking = False
+        self.accountStateChanged.emit()
+        self.configImportAccountFailed.emit(str(message))
 
     @Slot()
     def cancelPendingConfigImport(self):
         self._pending_config_import = None
+        self._pending_import_keys = []
+        self._config_import_checking = False
+        self.accountStateChanged.emit()
 
     @Slot(result=bool)
     def switchToTargetSchedule(self) -> bool:
@@ -1228,14 +1321,14 @@ class Plugin(CW2Plugin):
                 raise ValueError(f"账号加密失败：{error}")
         return str(settings.get("encrypted_account") or "").strip()
 
-    def _config_apply_import(self, settings, selected_keys):
+    def _config_apply_import(self, settings, selected_keys, account_blob=None):
         selected = list(dict.fromkeys(selected_keys or []))
         updates = {}
         account_selected = "chaoxing_account" in selected
-        account_blob = ""
         for key in selected:
             if key == "chaoxing_account":
-                account_blob = self._config_prepare_account(settings)
+                if account_blob is None:
+                    account_blob = self._config_prepare_account(settings)
                 continue
             item = self._config_item(key)
             if item is None or key not in settings:
@@ -1245,10 +1338,10 @@ class Plugin(CW2Plugin):
                 value = item.get("default")
             updates[key] = self._config_prepare_value(key, value)
         if account_selected:
-            self.config.encrypted_account = account_blob
+            self.config.encrypted_account = account_blob or ""
             self.config.last_sync_at = ""
             self._account_message = (
-                "已导入学习通账号，将在下次同步时验证"
+                "已导入学习通账号"
                 if account_blob else "已清除保存的账号"
             )
             self._account_error = False

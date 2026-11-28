@@ -20,6 +20,7 @@ FluentPage {
     property string pendingConfigItemKey: ""
     property string pendingConfigItemLabel: ""
     property string pendingConfigItemWarning: ""
+    property string pendingImportFailureMessage: ""
     property int editingIndex: -1
     property var editingRule: ({
         "name": "",
@@ -387,7 +388,6 @@ FluentPage {
             next.splice(index, 1)
         }
         configDialogSelected = next
-        updateConfigDialogButtons()
     }
 
     function handleConfigItemClick(key, label, warning, selected, empty) {
@@ -400,18 +400,6 @@ FluentPage {
             return
         }
         toggleConfigItem(key, selected)
-    }
-
-    function updateConfigDialogButtons() {
-        var okButton = configItemsDialog.standardButton(Dialog.Ok)
-        if (okButton) {
-            okButton.text = configDialogMode === "import" ? "导入" : "导出"
-            okButton.enabled = configDialogSelected.length > 0
-        }
-        var cancelButton = configItemsDialog.standardButton(Dialog.Cancel)
-        if (cancelButton) {
-            cancelButton.text = "取消"
-        }
     }
 
     function openConfigItemsDialog(mode, title, items) {
@@ -482,12 +470,30 @@ FluentPage {
 
     function confirmConfigDialog() {
         var selected = JSON.stringify(configDialogSelected)
-        var message = configDialogMode === "import"
-            ? backend.applyImportedConfig(selected)
-            : backend.applyExportConfig(selected)
-        page.configNotice = message
-        page.configNoticeError = message.indexOf("失败") >= 0
-            || message.indexOf("未选择") >= 0
+        if (configDialogMode === "export") {
+            var message = backend.applyExportConfig(selected)
+            page.configNotice = message
+            page.configNoticeError = message.indexOf("失败") >= 0
+                || message.indexOf("未选择") >= 0
+            configItemsDialog.close()
+            return
+        }
+        var raw = backend.confirmImportedConfig(selected)
+        var data
+        try {
+            data = JSON.parse(raw)
+        } catch (error) {
+            page.configNotice = "导入配置失败：返回数据异常"
+            page.configNoticeError = true
+            configItemsDialog.close()
+            return
+        }
+        if (data.status === "verifying") {
+            return
+        }
+        page.configNotice = data.message || ""
+        page.configNoticeError = data.status !== "done"
+        configItemsDialog.close()
     }
 
     function refresh() {
@@ -544,6 +550,15 @@ FluentPage {
         target: backend
         function onConfigChanged() {
             page.refresh()
+        }
+        function onConfigImportFinished(message) {
+            page.configNotice = message
+            page.configNoticeError = message.indexOf("失败") >= 0
+            configItemsDialog.close()
+        }
+        function onConfigImportAccountFailed(message) {
+            page.pendingImportFailureMessage = message
+            configImportFailureDialog.open()
         }
     }
 
@@ -1221,6 +1236,7 @@ FluentPage {
                 description: "将当前设置保存为 JSON 文件；学习通账号会留空"
 
                 Button {
+                    objectName: "configExportButton"
                     text: "导出"
                     icon.name: "ic_fluent_arrow_download_20_regular"
                     enabled: backend
@@ -1233,6 +1249,7 @@ FluentPage {
                 description: "从 JSON 文件恢复设置；不会修改已保存的学习通账号"
 
                 Button {
+                    objectName: "configImportButton"
                     text: "导入"
                     icon.name: "ic_fluent_arrow_upload_20_regular"
                     enabled: backend && !backend.syncing
@@ -1784,11 +1801,25 @@ FluentPage {
         title: page.configDialogTitle
         modal: true
         width: 560
-        standardButtons: Dialog.Ok | Dialog.Cancel
         closePolicy: Popup.NoAutoClose
 
-        onOpened: Qt.callLater(page.updateConfigDialogButtons)
-        onAccepted: page.confirmConfigDialog()
+        footer: DialogButtonBox {
+            Button {
+                Layout.fillWidth: true
+                text: page.configDialogMode === "import" ? "导入" : "导出"
+                highlighted: true
+                enabled: page.configDialogSelected.length > 0
+                    && !(backend && backend.configImportChecking)
+                onClicked: page.confirmConfigDialog()
+            }
+            Button {
+                Layout.fillWidth: true
+                text: "取消"
+                enabled: !(backend && backend.configImportChecking)
+                onClicked: configItemsDialog.reject()
+            }
+        }
+
         onRejected: {
             if (page.configDialogMode === "import" && backend) {
                 backend.cancelPendingConfigImport()
@@ -1806,6 +1837,15 @@ FluentPage {
                     : "勾选需要导出的项目。"
                 typography: Typography.Caption
                 color: Theme.currentTheme.colors.textSecondaryColor
+                wrapMode: Text.Wrap
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: backend && backend.configImportChecking
+                text: "正在验证学习通账号，请稍候…"
+                typography: Typography.Caption
+                color: Theme.currentTheme.colors.primaryColor
                 wrapMode: Text.Wrap
             }
 
@@ -1904,6 +1944,48 @@ FluentPage {
             Layout.fillWidth: true
             text: "「" + page.pendingConfigItemLabel + "」在配置文件中为空，"
                 + page.pendingConfigItemWarning + "。是否继续勾选？"
+            wrapMode: Text.Wrap
+        }
+    }
+
+    Dialog {
+        id: configImportFailureDialog
+        title: "账号验证失败"
+        modal: true
+        width: 460
+        closePolicy: Popup.NoAutoClose
+
+        footer: DialogButtonBox {
+            Button {
+                Layout.fillWidth: true
+                text: "取消"
+                onClicked: {
+                    if (backend) {
+                        backend.cancelPendingConfigImport()
+                    }
+                    configImportFailureDialog.close()
+                    configItemsDialog.close()
+                }
+            }
+            Button {
+                Layout.fillWidth: true
+                text: "导入其他配置"
+                highlighted: true
+                enabled: page.configDialogSelected.length > 1
+                onClicked: {
+                    var message = backend.importConfigWithoutAccount()
+                    page.configNotice = message
+                    page.configNoticeError = message.indexOf("失败") >= 0
+                    configImportFailureDialog.close()
+                    configItemsDialog.close()
+                }
+            }
+        }
+
+        Text {
+            Layout.fillWidth: true
+            text: "账号验证失败：" + page.pendingImportFailureMessage
+                + "\n可以取消本次导入，或只导入其他已勾选的配置项。"
             wrapMode: Text.Wrap
         }
     }
