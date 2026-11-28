@@ -171,7 +171,7 @@ CONFIG_ITEMS = [
         "key": "chaoxing_account",
         "label": "学习通账号与密码",
         "group": "账号",
-        "description": "出于安全考虑，导出时不可选；导入时作为一组恢复",
+        "description": "",
         "default": "",
         "kind": "account",
         "exportable": False,

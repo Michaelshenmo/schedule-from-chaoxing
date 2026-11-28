@@ -1829,6 +1829,7 @@ FluentPage {
                             Text {
                                 Layout.fillWidth: true
                                 Layout.leftMargin: 32
+                                visible: text.length > 0
                                 text: modelData.present
                                     ? modelData.description
                                     : "导入文件中不存在该项"
