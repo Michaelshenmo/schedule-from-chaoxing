@@ -1145,7 +1145,7 @@ class Plugin(CW2Plugin):
                 items.append(self._config_item_payload(
                     item, present=present, empty=empty,
                     enabled=present, checked=present and not empty,
-                    warning="账号或密码为空，勾选后将清除已保存的账号"
+                    warning="勾选后将清除已保存的账号"
                     if present and empty else "",
                 ))
                 continue
@@ -1155,7 +1155,7 @@ class Plugin(CW2Plugin):
             items.append(self._config_item_payload(
                 item, present=present, empty=empty,
                 enabled=present, checked=present and not empty,
-                warning="该项为空，勾选后将恢复默认设置" if present and empty else "",
+                warning="勾选后将恢复默认设置" if present and empty else "",
             ))
         return items
 

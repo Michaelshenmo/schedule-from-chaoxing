@@ -16,6 +16,10 @@ FluentPage {
     property string configDialogTitle: ""
     property var configDialogItems: []
     property var configDialogSelected: []
+    property int configDialogRevision: 0
+    property string pendingConfigItemKey: ""
+    property string pendingConfigItemLabel: ""
+    property string pendingConfigItemWarning: ""
     property int editingIndex: -1
     property var editingRule: ({
         "name": "",
@@ -386,6 +390,18 @@ FluentPage {
         updateConfigDialogButtons()
     }
 
+    function handleConfigItemClick(key, label, warning, selected, empty) {
+        if (selected && empty) {
+            pendingConfigItemKey = key
+            pendingConfigItemLabel = label
+            pendingConfigItemWarning = warning || "勾选后将恢复默认设置"
+            configDialogRevision++
+            configEmptyWarningDialog.open()
+            return
+        }
+        toggleConfigItem(key, selected)
+    }
+
     function updateConfigDialogButtons() {
         var okButton = configItemsDialog.standardButton(Dialog.Ok)
         if (okButton) {
@@ -402,6 +418,8 @@ FluentPage {
         configDialogMode = mode
         configDialogTitle = title
         configDialogItems = items
+        pendingConfigItemKey = ""
+        configDialogRevision = 0
         var selected = []
         for (var i = 0; i < items.length; i++) {
             if (items[i].checked && items[i].enabled) {
@@ -1821,9 +1839,16 @@ FluentPage {
                             CheckBox {
                                 Layout.fillWidth: true
                                 text: modelData.label
-                                checked: page.configItemSelected(modelData.key)
+                                checked: page.configDialogRevision >= 0
+                                    && page.configItemSelected(modelData.key)
                                 enabled: modelData.enabled
-                                onClicked: page.toggleConfigItem(modelData.key, checked)
+                                onClicked: page.handleConfigItemClick(
+                                    modelData.key,
+                                    modelData.label,
+                                    modelData.warning,
+                                    checked,
+                                    modelData.empty
+                                )
                             }
 
                             Text {
@@ -1837,22 +1862,49 @@ FluentPage {
                                 color: Theme.currentTheme.colors.textSecondaryColor
                                 wrapMode: Text.Wrap
                             }
-
-                            Text {
-                                Layout.fillWidth: true
-                                Layout.leftMargin: 32
-                                visible: page.configDialogMode === "import"
-                                    && modelData.empty
-                                    && page.configItemSelected(modelData.key)
-                                text: modelData.warning
-                                typography: Typography.Caption
-                                color: Theme.currentTheme.colors.systemCriticalColor
-                                wrapMode: Text.Wrap
-                            }
                         }
                     }
                 }
             }
+        }
+    }
+
+    Dialog {
+        id: configEmptyWarningDialog
+        title: "空项警告"
+        modal: true
+        width: 420
+        closePolicy: Popup.NoAutoClose
+
+        footer: DialogButtonBox {
+            Button {
+                Layout.fillWidth: true
+                text: "继续"
+                highlighted: true
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            }
+            Button {
+                Layout.fillWidth: true
+                text: "取消"
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+        }
+
+        onAccepted: {
+            page.toggleConfigItem(page.pendingConfigItemKey, true)
+            page.configDialogRevision++
+            page.pendingConfigItemKey = ""
+        }
+        onRejected: {
+            page.configDialogRevision++
+            page.pendingConfigItemKey = ""
+        }
+
+        Text {
+            Layout.fillWidth: true
+            text: "「" + page.pendingConfigItemLabel + "」在配置文件中为空，"
+                + page.pendingConfigItemWarning + "。是否继续勾选？"
+            wrapMode: Text.Wrap
         }
     }
 }
