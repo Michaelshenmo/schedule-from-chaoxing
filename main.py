@@ -110,6 +110,7 @@ CONFIG_ITEMS = [
         "description": "旧版排除项，导入后会迁移到日程映射",
         "default": "",
         "kind": "str",
+        "legacy": True,
     },
     {
         "key": "exclude_timeline",
@@ -118,6 +119,7 @@ CONFIG_ITEMS = [
         "description": "旧版排除项，导入后会迁移到日程映射",
         "default": "",
         "kind": "str",
+        "legacy": True,
     },
     {
         "key": "schedule_mappings",
@@ -1123,6 +1125,8 @@ class Plugin(CW2Plugin):
                 ))
                 continue
             value = self._config_export_value(key)
+            if item.get("legacy") and self._config_is_empty(value):
+                continue
             items.append(self._config_item_payload(
                 item, present=True, empty=self._config_is_empty(value),
                 enabled=True, checked=True,
@@ -1133,6 +1137,8 @@ class Plugin(CW2Plugin):
         items = []
         for item in CONFIG_ITEMS:
             key = item["key"]
+            if item.get("legacy") and key not in settings:
+                continue
             if key == "chaoxing_account":
                 account = str(settings.get("chaoxing_account") or "").strip()
                 password = str(settings.get("chaoxing_password") or "")
