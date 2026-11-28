@@ -479,6 +479,25 @@ def _parse_selected_config_keys(value):
     return result
 
 
+def _version_parts(value):
+    return tuple(int(part) for part in re.findall(r"\d+", str(value or ""))[:4])
+
+
+def _compare_config_versions(current, config):
+    if not config:
+        return "unknown"
+    current_parts = _version_parts(current)
+    config_parts = _version_parts(config)
+    if not current_parts or not config_parts:
+        return "unknown"
+    size = max(len(current_parts), len(config_parts))
+    current_parts = current_parts + (0,) * (size - len(current_parts))
+    config_parts = config_parts + (0,) * (size - len(config_parts))
+    if current_parts == config_parts:
+        return "same"
+    return "newer" if config_parts > current_parts else "older"
+
+
 def _sanitize_schedule_name(name: str) -> str:
     value = str(name or "").strip()
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
@@ -1005,6 +1024,15 @@ class Plugin(CW2Plugin):
             items = self._config_import_items(settings)
             if not any(item["present"] for item in items):
                 raise ValueError("配置文件不包含可导入的设置")
+            config_version = ""
+            if isinstance(data, dict):
+                config_version = str(
+                    data.get("plugin_version") or data.get("config_version") or ""
+                ).strip()
+            if not config_version:
+                config_version = str(settings.get("plugin_version") or "").strip()
+            current_version = self._plugin_version()
+            version_status = _compare_config_versions(current_version, config_version)
         except Exception as error:
             logger.warning(f"Failed to read config: {error}")
             self._set_status(f"导入配置失败：{error}")
@@ -1014,7 +1042,14 @@ class Plugin(CW2Plugin):
             )
         self._pending_config_import = {"settings": settings, "path": path}
         return json.dumps(
-            {"ok": True, "items": items, "file": path},
+            {
+                "ok": True,
+                "items": items,
+                "file": path,
+                "current_version": current_version,
+                "config_version": config_version,
+                "version_status": version_status,
+            },
             ensure_ascii=False,
         )
 
@@ -1258,6 +1293,20 @@ class Plugin(CW2Plugin):
             ))
         return items
 
+    def _plugin_version(self):
+        meta = getattr(self, "meta", None) or {}
+        version = str(meta.get("version") or "").strip()
+        if version:
+            return version
+        path = getattr(self, "PATH", None)
+        if path is not None:
+            try:
+                data = json.loads((path / "cwplugin.json").read_text(encoding="utf-8"))
+                return str(data.get("version") or "").strip()
+            except (OSError, ValueError):
+                pass
+        return ""
+
     def _config_export_payload(self, selected_keys):
         selected = set(selected_keys or [])
         settings = {}
@@ -1273,6 +1322,7 @@ class Plugin(CW2Plugin):
         return {
             "format": "class-widgets-2.chaoxing-sync.config",
             "version": 1,
+            "plugin_version": self._plugin_version(),
             "plugin_id": self.pid,
             "exported_at": datetime.now().isoformat(timespec="seconds"),
             "settings": settings,

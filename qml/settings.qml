@@ -21,6 +21,8 @@ FluentPage {
     property string pendingConfigItemLabel: ""
     property string pendingConfigItemWarning: ""
     property string pendingImportFailureMessage: ""
+    property var pendingImportPayload: null
+    property string importVersionWarningText: ""
     property int editingIndex: -1
     property var editingRule: ({
         "name": "",
@@ -418,6 +420,19 @@ FluentPage {
         configItemsDialog.open()
     }
 
+    function versionWarningText(status, current, config) {
+        var currentText = current || "未知"
+        var configText = config || "未记录"
+        var headline = status === "newer"
+            ? "配置文件版本过新，可能包含当前插件尚未支持的配置项。"
+            : status === "older"
+                ? "配置文件版本过旧，可能缺少当前插件需要的配置项。"
+                : "配置文件未记录有效版本号，可能来自较旧版本。"
+        return headline + "\n\n当前插件版本：" + currentText
+            + "\n配置文件版本：" + configText
+            + "\n\n是否继续选择要导入的项目？"
+    }
+
     function startConfigImport() {
         if (!backend) {
             return
@@ -439,6 +454,15 @@ FluentPage {
                 page.configNotice = data.message || "导入配置失败"
                 page.configNoticeError = true
             }
+            return
+        }
+        var status = data.version_status || "same"
+        if (status !== "same") {
+            page.pendingImportPayload = data
+            page.importVersionWarningText = page.versionWarningText(
+                status, data.current_version || "", data.config_version || ""
+            )
+            importVersionWarningDialog.open()
             return
         }
         page.openConfigItemsDialog("import", "选择要导入的项目", data.items || [])
@@ -1793,6 +1817,47 @@ FluentPage {
                     }
                 }
             }
+        }
+    }
+
+    Dialog {
+        id: importVersionWarningDialog
+        title: "配置版本提示"
+        modal: true
+        width: 460
+        closePolicy: Popup.NoAutoClose
+
+        footer: DialogButtonBox {
+            Button {
+                Layout.fillWidth: true
+                text: "取消"
+                onClicked: {
+                    if (backend) {
+                        backend.cancelPendingConfigImport()
+                    }
+                    page.pendingImportPayload = null
+                    importVersionWarningDialog.close()
+                }
+            }
+            Button {
+                Layout.fillWidth: true
+                text: "继续导入"
+                highlighted: true
+                onClicked: {
+                    var payload = page.pendingImportPayload
+                    page.pendingImportPayload = null
+                    importVersionWarningDialog.close()
+                    if (payload) {
+                        page.openConfigItemsDialog("import", "选择要导入的项目", payload.items || [])
+                    }
+                }
+            }
+        }
+
+        Text {
+            Layout.fillWidth: true
+            text: page.importVersionWarningText
+            wrapMode: Text.Wrap
         }
     }
 
