@@ -38,6 +38,146 @@ AUTO_TIMELINE_PREFIXES = ("chaoxing-timeline-", "cxd-")
 UI_CONFIG_NAME = "config.json"
 DEFAULT_SHOW_TIMETABLE_EXPORT = False
 
+CONFIG_ITEMS = [
+    {
+        "key": "sync_courses",
+        "label": "同步课程",
+        "group": "同步",
+        "description": "写入课程名称、教师和地点",
+        "default": True,
+        "kind": "bool",
+    },
+    {
+        "key": "sync_timeline",
+        "label": "同步时间线",
+        "group": "同步",
+        "description": "获取并写入课程时间线",
+        "default": True,
+        "kind": "bool",
+    },
+    {
+        "key": "interval_minutes",
+        "label": "自动同步间隔",
+        "group": "同步",
+        "description": "分钟；-1 表示仅启动和手动同步",
+        "default": 20,
+        "kind": "int",
+    },
+    {
+        "key": "schedule_name",
+        "label": "目标课表名称",
+        "group": "课表",
+        "description": "同步结果写入的独立课表",
+        "default": DEFAULT_SCHEDULE_NAME,
+        "kind": "str",
+    },
+    {
+        "key": "timetable_file",
+        "label": "课表文件",
+        "group": "课表",
+        "description": "本地 .xlsx 课表路径",
+        "default": "",
+        "kind": "str",
+    },
+    {
+        "key": "timetable_url",
+        "label": "课表下载地址",
+        "group": "课表",
+        "description": "课表文件的下载地址",
+        "default": "",
+        "kind": "str",
+    },
+    {
+        "key": "timeline_server_url",
+        "label": "时间线服务器",
+        "group": "时间线",
+        "description": "集控系统服务器地址",
+        "default": "",
+        "kind": "str",
+    },
+    {
+        "key": "device_sn",
+        "label": "设备 SN",
+        "group": "时间线",
+        "description": "学校提供的设备 SN",
+        "default": "",
+        "kind": "str",
+    },
+    {
+        "key": "exclude_courses",
+        "label": "排除课程（旧版）",
+        "group": "日程映射",
+        "description": "旧版排除项，导入后会迁移到日程映射",
+        "default": "",
+        "kind": "str",
+    },
+    {
+        "key": "exclude_timeline",
+        "label": "排除时间线（旧版）",
+        "group": "日程映射",
+        "description": "旧版排除项，导入后会迁移到日程映射",
+        "default": "",
+        "kind": "str",
+    },
+    {
+        "key": "schedule_mappings",
+        "label": "日程映射规则",
+        "group": "日程映射",
+        "description": "按名称、星期和周次改写或排除日程",
+        "default": [],
+        "kind": "mappings",
+    },
+    {
+        "key": "schedule_max_week",
+        "label": "最大周次",
+        "group": "日程映射",
+        "description": "最近同步的周次范围，用于周次选择器",
+        "default": 20,
+        "kind": "int",
+    },
+    {
+        "key": "break_limit_minutes",
+        "label": "课间上限",
+        "group": "日程映射",
+        "description": "分钟；-1 不限制，0 不填充课间",
+        "default": 45,
+        "kind": "int",
+    },
+    {
+        "key": "notify_startup",
+        "label": "启动同步通知",
+        "group": "通知",
+        "description": "启动时自动同步完成后通知",
+        "default": True,
+        "kind": "bool",
+    },
+    {
+        "key": "notify_scheduled",
+        "label": "定时同步通知",
+        "group": "通知",
+        "description": "定时自动同步完成后通知",
+        "default": False,
+        "kind": "bool",
+    },
+    {
+        "key": "notify_manual",
+        "label": "手动同步通知",
+        "group": "通知",
+        "description": "点击立即同步后通知",
+        "default": True,
+        "kind": "bool",
+    },
+    {
+        "key": "chaoxing_account",
+        "label": "学习通账号与密码",
+        "group": "账号",
+        "description": "出于安全考虑，导出时不可选；导入时作为一组恢复",
+        "default": "",
+        "kind": "account",
+        "exportable": False,
+    },
+]
+
 
 class PluginConfig(ConfigBaseModel):
     encrypted_account: str = ""
@@ -320,6 +460,23 @@ def _coerce_bool(value, default=False):
     return default
 
 
+def _parse_selected_config_keys(value):
+    try:
+        data = json.loads(value or "[]")
+    except ValueError as error:
+        raise ValueError(f"选择项格式不正确：{error}")
+    if not isinstance(data, list):
+        raise ValueError("选择项格式不正确")
+    result = []
+    for item in data:
+        if not isinstance(item, str):
+            continue
+        key = item.strip()
+        if key and key not in result:
+            result.append(key)
+    return result
+
+
 def _sanitize_schedule_name(name: str) -> str:
     value = str(name or "").strip()
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
@@ -348,6 +505,7 @@ class Plugin(CW2Plugin):
         self._account_checking = False
         self._account_verified = False
         self._pending_encrypted_account = ""
+        self._pending_config_import = None
         self._closing = False
         self._status = ""
         self._status_details = "尚无同步记录"
@@ -759,7 +917,31 @@ class Plugin(CW2Plugin):
         self._start_sync("manual")
 
     @Slot(result=str)
-    def exportConfig(self) -> str:
+    def startExportConfig(self) -> str:
+        try:
+            items = self._config_export_items()
+        except Exception as error:
+            logger.warning(f"Failed to prepare config export: {error}")
+            return json.dumps(
+                {"ok": False, "message": f"准备导出配置失败：{error}"},
+                ensure_ascii=False,
+            )
+        return json.dumps({"ok": True, "items": items}, ensure_ascii=False)
+
+    @Slot(str, result=str)
+    def applyExportConfig(self, selected_keys: str) -> str:
+        try:
+            selected = _parse_selected_config_keys(selected_keys)
+        except ValueError as error:
+            return f"导出配置失败：{error}"
+        exportable = {
+            item["key"]
+            for item in CONFIG_ITEMS
+            if item.get("exportable", True) and item["key"] != "chaoxing_account"
+        }
+        selected = [key for key in selected if key in exportable]
+        if not selected:
+            return "未选择要导出的配置项"
         path, _ = QFileDialog.getSaveFileName(
             QApplication.activeWindow(),
             "导出配置",
@@ -771,7 +953,7 @@ class Plugin(CW2Plugin):
         if not path.lower().endswith(".json"):
             path += ".json"
         try:
-            payload = self._config_export_payload()
+            payload = self._config_export_payload(selected)
             Path(path).write_text(
                 json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
@@ -784,9 +966,12 @@ class Plugin(CW2Plugin):
         return f"已导出配置到 {path}"
 
     @Slot(result=str)
-    def importConfig(self) -> str:
+    def startImportConfig(self) -> str:
         if self._syncing:
-            return "正在同步课表，请稍后再导入配置"
+            return json.dumps(
+                {"ok": False, "message": "正在同步课表，请稍后再导入配置"},
+                ensure_ascii=False,
+            )
         path, _ = QFileDialog.getOpenFileName(
             QApplication.activeWindow(),
             "导入配置",
@@ -794,19 +979,71 @@ class Plugin(CW2Plugin):
             "JSON 配置 (*.json);;所有文件 (*)",
         )
         if not path:
-            return ""
+            return json.dumps({"ok": False, "cancelled": True}, ensure_ascii=False)
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
-            self._apply_imported_config(data)
+            settings = data.get("settings") if isinstance(data, dict) else None
+            if not isinstance(settings, dict):
+                settings = data
+            if not isinstance(settings, dict):
+                raise ValueError("配置文件格式不正确")
+            items = self._config_import_items(settings)
+            if not any(item["present"] for item in items):
+                raise ValueError("配置文件不包含可导入的设置")
+        except Exception as error:
+            logger.warning(f"Failed to read config: {error}")
+            self._set_status(f"导入配置失败：{error}")
+            return json.dumps(
+                {"ok": False, "message": f"导入配置失败：{error}"},
+                ensure_ascii=False,
+            )
+        self._pending_config_import = {"settings": settings, "path": path}
+        return json.dumps(
+            {"ok": True, "items": items, "file": path},
+            ensure_ascii=False,
+        )
+
+    @Slot(str, result=str)
+    def applyImportedConfig(self, selected_keys: str) -> str:
+        if self._pending_config_import is None:
+            return "请先选择要导入的配置文件"
+        try:
+            selected = _parse_selected_config_keys(selected_keys)
+        except ValueError as error:
+            return f"导入配置失败：{error}"
+        if not selected:
+            return "未选择要导入的配置项"
+        pending = self._pending_config_import
+        try:
+            self._config_apply_import(pending["settings"], selected)
         except Exception as error:
             logger.warning(f"Failed to import config: {error}")
             self._set_status(f"导入配置失败：{error}")
             return f"导入配置失败：{error}"
+        account_selected = "chaoxing_account" in selected
+        account_imported = False
+        if account_selected:
+            settings = pending["settings"]
+            account = str(settings.get("chaoxing_account") or "").strip()
+            password = str(settings.get("chaoxing_password") or "")
+            legacy = str(settings.get("encrypted_account") or "").strip()
+            account_imported = bool((account and password) or legacy)
+        self._pending_config_import = None
         self._migrate_exclusions_to_mappings()
         self._save_config()
         self._apply_config()
-        self._set_status("配置已导入；学习通账号保持不变")
-        return f"已从 {Path(path).name} 导入配置"
+        self._set_status("配置已导入")
+        message = f"已从 {Path(pending['path']).name} 导入选中的配置项"
+        if account_selected:
+            message += (
+                "；账号将在下次同步时验证"
+                if account_imported else "；已清除保存的账号"
+            )
+        return message
+
+    @Slot()
+    def cancelPendingConfigImport(self):
+        self._pending_config_import = None
 
     @Slot(result=bool)
     def switchToTargetSchedule(self) -> bool:
@@ -840,85 +1077,117 @@ class Plugin(CW2Plugin):
         except Exception as error:
             logger.warning(f"Failed to save plugin config: {error}")
 
-    def _config_export_payload(self):
+    @staticmethod
+    def _config_is_empty(value):
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not value.strip()
+        if isinstance(value, (list, tuple, dict, set)):
+            return len(value) == 0
+        return False
+
+    @staticmethod
+    def _config_item(key):
+        for item in CONFIG_ITEMS:
+            if item["key"] == key:
+                return item
+        return None
+
+    @staticmethod
+    def _config_item_payload(item, present, empty, enabled, checked, warning=""):
+        return {
+            "key": item["key"],
+            "label": item["label"],
+            "group": item["group"],
+            "description": item["description"],
+            "present": bool(present),
+            "empty": bool(empty),
+            "enabled": bool(enabled),
+            "checked": bool(checked),
+            "warning": str(warning or ""),
+        }
+
+    def _config_export_value(self, key):
+        if key == "schedule_mappings":
+            return normalize_rules(self.config.schedule_mappings)
+        return getattr(self.config, key, "")
+
+    def _config_export_items(self):
+        items = []
+        for item in CONFIG_ITEMS:
+            key = item["key"]
+            if key == "chaoxing_account":
+                items.append(self._config_item_payload(
+                    item, present=True, empty=True, enabled=False, checked=False,
+                ))
+                continue
+            value = self._config_export_value(key)
+            items.append(self._config_item_payload(
+                item, present=True, empty=self._config_is_empty(value),
+                enabled=True, checked=True,
+            ))
+        return items
+
+    def _config_import_items(self, settings):
+        items = []
+        for item in CONFIG_ITEMS:
+            key = item["key"]
+            if key == "chaoxing_account":
+                account = str(settings.get("chaoxing_account") or "").strip()
+                password = str(settings.get("chaoxing_password") or "")
+                legacy_blob = str(settings.get("encrypted_account") or "").strip()
+                present = any(
+                    name in settings
+                    for name in ("chaoxing_account", "chaoxing_password", "encrypted_account")
+                )
+                empty = not ((account and password) or legacy_blob)
+                items.append(self._config_item_payload(
+                    item, present=present, empty=empty,
+                    enabled=present, checked=present and not empty,
+                    warning="账号或密码为空，勾选后将清除已保存的账号"
+                    if present and empty else "",
+                ))
+                continue
+            present = key in settings
+            value = settings.get(key)
+            empty = present and self._config_is_empty(value)
+            items.append(self._config_item_payload(
+                item, present=present, empty=empty,
+                enabled=present, checked=present and not empty,
+                warning="该项为空，勾选后将恢复默认设置" if present and empty else "",
+            ))
+        return items
+
+    def _config_export_payload(self, selected_keys):
+        selected = set(selected_keys or [])
+        settings = {}
+        for item in CONFIG_ITEMS:
+            key = item["key"]
+            if key == "chaoxing_account" or not item.get("exportable", True):
+                continue
+            if key in selected:
+                settings[key] = self._config_export_value(key)
+        # Keep the account schema explicit, but never write credentials.
+        settings["chaoxing_account"] = ""
+        settings["chaoxing_password"] = ""
         return {
             "format": "class-widgets-2.chaoxing-sync.config",
             "version": 1,
             "plugin_id": self.pid,
             "exported_at": datetime.now().isoformat(timespec="seconds"),
-            "settings": {
-                # Never export credentials, even when an account is configured.
-                "encrypted_account": "",
-                "sync_courses": bool(self.config.sync_courses),
-                "sync_timeline": bool(self.config.sync_timeline),
-                "interval_minutes": int(self.config.interval_minutes),
-                "schedule_name": str(self.config.schedule_name or ""),
-                "timetable_file": str(self.config.timetable_file or ""),
-                "timetable_url": str(self.config.timetable_url or ""),
-                "timeline_server_url": str(self.config.timeline_server_url or ""),
-                "device_sn": str(self.config.device_sn or ""),
-                "exclude_courses": str(self.config.exclude_courses or ""),
-                "exclude_timeline": str(self.config.exclude_timeline or ""),
-                "schedule_mappings": normalize_rules(self.config.schedule_mappings),
-                "schedule_max_week": int(self.config.schedule_max_week or 20),
-                "break_limit_minutes": int(self.config.break_limit_minutes),
-                "notify_startup": bool(self.config.notify_startup),
-                "notify_scheduled": bool(self.config.notify_scheduled),
-                "notify_manual": bool(self.config.notify_manual),
-            },
+            "settings": settings,
         }
 
-    def _apply_imported_config(self, data):
-        if not isinstance(data, dict):
-            raise ValueError("配置文件格式不正确")
-        settings = data.get("settings")
-        if not isinstance(settings, dict):
-            settings = data
-        known_keys = {
-            "sync_courses",
-            "sync_timeline",
-            "interval_minutes",
-            "schedule_name",
-            "timetable_file",
-            "timetable_url",
-            "timeline_server_url",
-            "device_sn",
-            "exclude_courses",
-            "exclude_timeline",
-            "schedule_mappings",
-            "schedule_max_week",
-            "break_limit_minutes",
-            "notify_startup",
-            "notify_scheduled",
-            "notify_manual",
-        }
-        if not any(key in settings for key in known_keys):
-            raise ValueError("配置文件不包含可导入的设置")
-
-        if "sync_courses" in settings:
-            self.config.sync_courses = _coerce_bool(settings["sync_courses"], self.config.sync_courses)
-        if "sync_timeline" in settings:
-            self.config.sync_timeline = _coerce_bool(settings["sync_timeline"], self.config.sync_timeline)
-        if "interval_minutes" in settings:
-            try:
-                interval = int(settings["interval_minutes"])
-            except (TypeError, ValueError):
-                raise ValueError("自动同步间隔格式不正确")
-            self.config.interval_minutes = max(-1, min(interval, 1440))
-        if "schedule_name" in settings:
-            self.config.schedule_name = _sanitize_schedule_name(str(settings["schedule_name"] or ""))
-        for key in (
-            "timetable_file",
-            "timetable_url",
-            "timeline_server_url",
-            "device_sn",
-            "exclude_courses",
-            "exclude_timeline",
-        ):
-            if key in settings:
-                setattr(self.config, key, str(settings[key] or "").strip())
-        if "schedule_mappings" in settings:
-            raw = settings["schedule_mappings"]
+    def _config_prepare_value(self, key, value):
+        item = self._config_item(key)
+        if item is None:
+            raise ValueError(f"未知配置项：{key}")
+        kind = item.get("kind")
+        if key == "schedule_name":
+            return _sanitize_schedule_name(str(value or ""))
+        if key == "schedule_mappings":
+            raw = value
             if isinstance(raw, str):
                 try:
                     raw = json.loads(raw or "[]")
@@ -926,22 +1195,60 @@ class Plugin(CW2Plugin):
                     raise ValueError(f"日程映射格式不正确：{error}")
             if not isinstance(raw, list):
                 raise ValueError("日程映射格式不正确")
-            self.config.schedule_mappings = dump_rules(normalize_rules(raw))
-        if "schedule_max_week" in settings:
+            return dump_rules(normalize_rules(raw))
+        if kind == "bool":
+            return _coerce_bool(value, bool(item.get("default")))
+        if kind == "int":
             try:
-                max_week = int(settings["schedule_max_week"])
+                number = int(value)
             except (TypeError, ValueError):
-                raise ValueError("最大周次格式不正确")
-            self.config.schedule_max_week = max(1, min(max_week, 60))
-        if "break_limit_minutes" in settings:
+                raise ValueError(f"{item['label']}格式不正确")
+            if key == "interval_minutes":
+                number = max(-1, min(number, 1440))
+            elif key == "break_limit_minutes":
+                number = max(-1, min(number, 1440))
+            elif key == "schedule_max_week":
+                number = max(1, min(number, 60))
+            return number
+        return str(value or "").strip()
+
+    def _config_prepare_account(self, settings):
+        account = str(settings.get("chaoxing_account") or "").strip()
+        password = str(settings.get("chaoxing_password") or "")
+        if account and password:
             try:
-                break_limit = int(settings["break_limit_minutes"])
-            except (TypeError, ValueError):
-                raise ValueError("课间上限格式不正确")
-            self.config.break_limit_minutes = max(-1, min(break_limit, 1440))
-        for key in ("notify_startup", "notify_scheduled", "notify_manual"):
-            if key in settings:
-                setattr(self.config, key, _coerce_bool(settings[key], getattr(self.config, key)))
+                return protect_account(account, password)
+            except Exception as error:
+                raise ValueError(f"账号加密失败：{error}")
+        return str(settings.get("encrypted_account") or "").strip()
+
+    def _config_apply_import(self, settings, selected_keys):
+        selected = list(dict.fromkeys(selected_keys or []))
+        updates = {}
+        account_selected = "chaoxing_account" in selected
+        account_blob = ""
+        for key in selected:
+            if key == "chaoxing_account":
+                account_blob = self._config_prepare_account(settings)
+                continue
+            item = self._config_item(key)
+            if item is None or key not in settings:
+                continue
+            value = settings[key]
+            if self._config_is_empty(value):
+                value = item.get("default")
+            updates[key] = self._config_prepare_value(key, value)
+        if account_selected:
+            self.config.encrypted_account = account_blob
+            self.config.last_sync_at = ""
+            self._account_message = (
+                "已导入学习通账号，将在下次同步时验证"
+                if account_blob else "已清除保存的账号"
+            )
+            self._account_error = False
+            self.accountStateChanged.emit()
+        for key, value in updates.items():
+            setattr(self.config, key, value)
 
     def _load_show_timetable_export(self) -> bool:
         path = self.PATH / UI_CONFIG_NAME

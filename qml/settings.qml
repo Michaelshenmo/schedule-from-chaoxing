@@ -12,6 +12,10 @@ FluentPage {
     property var mappingRules: []
     property string configNotice: ""
     property bool configNoticeError: false
+    property string configDialogMode: "import"
+    property string configDialogTitle: ""
+    property var configDialogItems: []
+    property var configDialogSelected: []
     property int editingIndex: -1
     property var editingRule: ({
         "name": "",
@@ -364,6 +368,108 @@ FluentPage {
         mappingRules = next
         saveMappings()
         editingIndex = -1
+    }
+
+    function configItemSelected(key) {
+        return configDialogSelected.indexOf(key) >= 0
+    }
+
+    function toggleConfigItem(key, selected) {
+        var next = configDialogSelected.slice()
+        var index = next.indexOf(key)
+        if (selected && index < 0) {
+            next.push(key)
+        } else if (!selected && index >= 0) {
+            next.splice(index, 1)
+        }
+        configDialogSelected = next
+        updateConfigDialogButtons()
+    }
+
+    function updateConfigDialogButtons() {
+        var okButton = configItemsDialog.standardButton(Dialog.Ok)
+        if (okButton) {
+            okButton.text = configDialogMode === "import" ? "导入" : "导出"
+            okButton.enabled = configDialogSelected.length > 0
+        }
+        var cancelButton = configItemsDialog.standardButton(Dialog.Cancel)
+        if (cancelButton) {
+            cancelButton.text = "取消"
+        }
+    }
+
+    function openConfigItemsDialog(mode, title, items) {
+        configDialogMode = mode
+        configDialogTitle = title
+        configDialogItems = items
+        var selected = []
+        for (var i = 0; i < items.length; i++) {
+            if (items[i].checked && items[i].enabled) {
+                selected.push(items[i].key)
+            }
+        }
+        configDialogSelected = selected
+        configItemsDialog.open()
+    }
+
+    function startConfigImport() {
+        if (!backend) {
+            return
+        }
+        var raw = backend.startImportConfig()
+        if (!raw) {
+            return
+        }
+        var data
+        try {
+            data = JSON.parse(raw)
+        } catch (error) {
+            page.configNotice = "导入配置失败：返回数据异常"
+            page.configNoticeError = true
+            return
+        }
+        if (!data.ok) {
+            if (!data.cancelled) {
+                page.configNotice = data.message || "导入配置失败"
+                page.configNoticeError = true
+            }
+            return
+        }
+        page.openConfigItemsDialog("import", "选择要导入的项目", data.items || [])
+    }
+
+    function startConfigExport() {
+        if (!backend) {
+            return
+        }
+        var raw = backend.startExportConfig()
+        if (!raw) {
+            return
+        }
+        var data
+        try {
+            data = JSON.parse(raw)
+        } catch (error) {
+            page.configNotice = "导出配置失败：返回数据异常"
+            page.configNoticeError = true
+            return
+        }
+        if (!data.ok) {
+            page.configNotice = data.message || "导出配置失败"
+            page.configNoticeError = true
+            return
+        }
+        page.openConfigItemsDialog("export", "选择要导出的项目", data.items || [])
+    }
+
+    function confirmConfigDialog() {
+        var selected = JSON.stringify(configDialogSelected)
+        var message = configDialogMode === "import"
+            ? backend.applyImportedConfig(selected)
+            : backend.applyExportConfig(selected)
+        page.configNotice = message
+        page.configNoticeError = message.indexOf("失败") >= 0
+            || message.indexOf("未选择") >= 0
     }
 
     function refresh() {
@@ -1100,11 +1206,7 @@ FluentPage {
                     text: "导出"
                     icon.name: "ic_fluent_arrow_download_20_regular"
                     enabled: backend
-                    onClicked: {
-                        var message = backend.exportConfig()
-                        page.configNotice = message
-                        page.configNoticeError = message.indexOf("失败") >= 0
-                    }
+                    onClicked: page.startConfigExport()
                 }
             }
 
@@ -1116,11 +1218,7 @@ FluentPage {
                     text: "导入"
                     icon.name: "ic_fluent_arrow_upload_20_regular"
                     enabled: backend && !backend.syncing
-                    onClicked: {
-                        var message = backend.importConfig()
-                        page.configNotice = message
-                        page.configNoticeError = message.indexOf("失败") >= 0
-                    }
+                    onClicked: page.startConfigImport()
                 }
             }
 
@@ -1656,6 +1754,100 @@ FluentPage {
                             typography: Typography.Caption
                             color: Theme.currentTheme.colors.textSecondaryColor
                             wrapMode: Text.Wrap
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: configItemsDialog
+        title: page.configDialogTitle
+        modal: true
+        width: 560
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        closePolicy: Popup.NoAutoClose
+
+        onOpened: page.updateConfigDialogButtons()
+        onAccepted: page.confirmConfigDialog()
+        onRejected: {
+            if (page.configDialogMode === "import" && backend) {
+                backend.cancelPendingConfigImport()
+            }
+        }
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 10
+
+            Text {
+                Layout.fillWidth: true
+                text: page.configDialogMode === "import"
+                    ? "勾选需要导入的项目；未勾选的项目沿用当前设置。空项勾选后会恢复默认值。"
+                    : "勾选需要导出的项目；账号与密码不会导出。"
+                typography: Typography.Caption
+                color: Theme.currentTheme.colors.textSecondaryColor
+                wrapMode: Text.Wrap
+            }
+
+            ScrollView {
+                id: configItemsScroll
+                Layout.fillWidth: true
+                Layout.preferredHeight: 380
+                clip: true
+                ScrollBar.vertical: ScrollBar {}
+
+                ColumnLayout {
+                    width: configItemsScroll.availableWidth
+                    spacing: 8
+
+                    Repeater {
+                        model: page.configDialogItems
+
+                        delegate: ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+
+                            Text {
+                                Layout.fillWidth: true
+                                Layout.topMargin: index > 0 ? 10 : 0
+                                text: modelData.group
+                                typography: Typography.Caption
+                                color: Theme.currentTheme.colors.textSecondaryColor
+                                visible: index === 0 || page.configDialogItems[index - 1].group !== modelData.group
+                            }
+
+                            CheckBox {
+                                Layout.fillWidth: true
+                                text: modelData.label
+                                checked: page.configItemSelected(modelData.key)
+                                enabled: modelData.enabled
+                                onClicked: page.toggleConfigItem(modelData.key, checked)
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                Layout.leftMargin: 32
+                                text: modelData.present
+                                    ? modelData.description
+                                    : "导入文件中不存在该项"
+                                typography: Typography.Caption
+                                color: Theme.currentTheme.colors.textSecondaryColor
+                                wrapMode: Text.Wrap
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                Layout.leftMargin: 32
+                                visible: page.configDialogMode === "import"
+                                    && modelData.empty
+                                    && page.configItemSelected(modelData.key)
+                                text: modelData.warning
+                                typography: Typography.Caption
+                                color: Theme.currentTheme.colors.systemCriticalColor
+                                wrapMode: Text.Wrap
+                            }
                         }
                     }
                 }
