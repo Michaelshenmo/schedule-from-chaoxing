@@ -1098,7 +1098,7 @@ FluentPage {
 
                 Button {
                     text: "导出"
-                    icon.name: "ic_fluent_arrow_upload_20_regular"
+                    icon.name: "ic_fluent_arrow_download_20_regular"
                     enabled: backend
                     onClicked: {
                         var message = backend.exportConfig()
@@ -1114,7 +1114,7 @@ FluentPage {
 
                 Button {
                     text: "导入"
-                    icon.name: "ic_fluent_arrow_download_20_regular"
+                    icon.name: "ic_fluent_arrow_upload_20_regular"
                     enabled: backend && !backend.syncing
                     onClicked: {
                         var message = backend.importConfig()
